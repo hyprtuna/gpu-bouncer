@@ -115,9 +115,11 @@ type Plan struct {
 	Trigger Trigger `json:"trigger"`
 	// Beneficiary is the service the plan is freeing memory for, if any.
 	Beneficiary string `json:"beneficiary"`
-	// CurrentFreeMiB and TargetFreeMiB frame the decision.
+	// CurrentFreeMiB and TargetFreeMiB frame the decision. TotalMiB is the
+	// card's size, which caps what any plan can expect to free.
 	CurrentFreeMiB uint64   `json:"current_free_mib"`
 	TargetFreeMiB  uint64   `json:"target_free_mib"`
+	TotalMiB       uint64   `json:"total_mib"`
 	Actions        []Action `json:"actions"`
 	// Notes record every service considered and passed over, and why. They
 	// exist so that an empty plan is never silent.
@@ -137,11 +139,17 @@ func (o Observation) deviceUnknownNote() string {
 // Empty reports whether the plan would change anything.
 func (p Plan) Empty() bool { return len(p.Actions) == 0 }
 
-// ExpectedFreeMiB is free VRAM now plus what the actions expect to release.
+// ExpectedFreeMiB is free VRAM now plus what the actions expect to release,
+// capped at the card's total: a service's own account of its holdings can
+// exceed what the driver sees, and a plan must not promise more memory than
+// the card has.
 func (p Plan) ExpectedFreeMiB() uint64 {
 	total := p.CurrentFreeMiB
 	for _, a := range p.Actions {
 		total += a.ExpectFreeMiB
+	}
+	if p.TotalMiB > 0 && total > p.TotalMiB {
+		return p.TotalMiB
 	}
 	return total
 }
@@ -156,6 +164,7 @@ func Decide(cfg config.Config, obs Observation) Plan {
 		return plan
 	}
 	plan.CurrentFreeMiB = obs.Device.FreeMiB()
+	plan.TotalMiB = obs.Device.TotalMiB
 
 	beneficiary, target, trigger, notes := selectDemand(cfg, obs)
 	plan.Notes = append(plan.Notes, notes...)
@@ -180,7 +189,8 @@ func Decide(cfg config.Config, obs Observation) Plan {
 		return plan
 	}
 
-	candidates := evictionCandidates(obs.Services, benefit)
+	candidates, passedOver := evictionCandidates(obs.Services, benefit)
+	plan.Notes = append(plan.Notes, passedOver...)
 	freed := uint64(0)
 	for _, c := range candidates {
 		if freed >= needed {
@@ -288,22 +298,32 @@ func bestClaim(cfg config.Config, obs Observation) (Claim, bool) {
 // beneficiary, in the order they should be freed: lowest priority first, and
 // within a priority the largest holder first so the target is reached in the
 // fewest disruptions. The ordering is total, so the plan is deterministic.
-func evictionCandidates(services []ServiceState, beneficiary ServiceState) []ServiceState {
-	var out []ServiceState
+//
+// Every service it passes over gets a note saying why, so that an empty plan
+// is never silent about a peer that was considered.
+func evictionCandidates(services []ServiceState, beneficiary ServiceState) (candidates []ServiceState, notes []string) {
 	for _, s := range services {
 		switch {
 		case s.Name == beneficiary.Name:
 			continue
+		case s.ProbeErr != "":
+			notes = append(notes, fmt.Sprintf("%s left alone, its last probe failed: %s", s.Name, s.ProbeErr))
+			continue
+		case !s.Up:
+			notes = append(notes, fmt.Sprintf("%s left alone, it is not running", s.Name))
+			continue
 		case s.Priority >= beneficiary.Priority:
 			// Equal priority never evicts, so a tie cannot ping pong.
-			continue
-		case !s.Up, s.ProbeErr != "":
+			notes = append(notes, fmt.Sprintf("%s left alone, priority %d is not below %s at %d",
+				s.Name, s.Priority, beneficiary.Name, beneficiary.Priority))
 			continue
 		case s.HeldMiB == 0:
+			notes = append(notes, fmt.Sprintf("%s left alone, it holds no VRAM", s.Name))
 			continue
 		}
-		out = append(out, s)
+		candidates = append(candidates, s)
 	}
+	out := candidates
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Priority != out[j].Priority {
 			return out[i].Priority < out[j].Priority
@@ -313,7 +333,7 @@ func evictionCandidates(services []ServiceState, beneficiary ServiceState) []Ser
 		}
 		return out[i].Name < out[j].Name
 	})
-	return out
+	return out, notes
 }
 
 // chooseVerb picks the least invasive action a service permits, or explains
@@ -367,11 +387,15 @@ func highestPriorityUp(services []ServiceState) (ServiceState, bool) {
 // `gpu-bouncer evict`, and it still refuses anything the safety rules forbid.
 func Evict(obs Observation, names []string) Plan {
 	plan := Plan{Trigger: TriggerEvict}
-	if obs.DeviceKnown {
-		plan.CurrentFreeMiB = obs.Device.FreeMiB()
-	} else {
-		plan.Notes = append(plan.Notes, "GPU state could not be read, VRAM figures are unknown")
+	if !obs.DeviceKnown {
+		// Same rule as Decide: an operator override is still an action the
+		// daemon would take on a card it cannot see, and the before and
+		// after figures it reports would both be zero.
+		plan.Notes = append(plan.Notes, obs.deviceUnknownNote())
+		return plan
 	}
+	plan.CurrentFreeMiB = obs.Device.FreeMiB()
+	plan.TotalMiB = obs.Device.TotalMiB
 	for _, name := range names {
 		svc, ok := findService(obs.Services, name)
 		if !ok {
@@ -405,10 +429,15 @@ func Evict(obs Observation, names []string) Plan {
 // named one. The kept service does not have to be running.
 func EvictAllExcept(obs Observation, keep string) Plan {
 	if _, ok := findService(obs.Services, keep); !ok {
-		return Plan{
+		plan := Plan{
 			Trigger: TriggerEvict,
 			Notes:   []string{fmt.Sprintf("refusing to evict anything: %q is not in the config, and a typo here would clear the GPU", keep)},
 		}
+		if obs.DeviceKnown {
+			plan.CurrentFreeMiB = obs.Device.FreeMiB()
+			plan.TotalMiB = obs.Device.TotalMiB
+		}
+		return plan
 	}
 	var names []string
 	for _, s := range obs.Services {

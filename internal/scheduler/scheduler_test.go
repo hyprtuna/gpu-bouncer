@@ -245,7 +245,7 @@ func TestDecideGolden(t *testing.T) {
 			wantNote:    "legacy skipped, it has no release API and allow_stop is false",
 		},
 		{
-			name: "a service whose probe failed is never acted on",
+			name: "a service whose probe failed is never acted on, and says so",
 			cfg:  cfg(true, 2048, "", map[string]int{"ollama": 50, "comfyui": 20}),
 			obs: obs(7188,
 				releasable("ollama", 50, 200),
@@ -254,9 +254,10 @@ func TestDecideGolden(t *testing.T) {
 			wantSteps:   nil,
 			wantTrigger: TriggerReactive,
 			wantBenefit: "ollama",
+			wantNote:    "comfyui left alone, its last probe failed: connection refused",
 		},
 		{
-			name: "a down service is not a candidate",
+			name: "a down service is not a candidate, and says so",
 			cfg:  cfg(true, 2048, "", map[string]int{"ollama": 50, "comfyui": 20}),
 			obs: obs(7188,
 				releasable("ollama", 50, 200),
@@ -264,6 +265,29 @@ func TestDecideGolden(t *testing.T) {
 			wantSteps:   nil,
 			wantTrigger: TriggerReactive,
 			wantBenefit: "ollama",
+			wantNote:    "comfyui left alone, it is not running",
+		},
+		{
+			name: "a peer at equal priority holding VRAM is passed over with a note",
+			cfg:  cfg(true, 100000, "", map[string]int{"benef": 50, "peer": 50}),
+			obs: obs(354,
+				releasable("benef", 50, 100),
+				releasable("peer", 50, 3000)),
+			wantSteps:   nil,
+			wantTrigger: TriggerReactive,
+			wantBenefit: "benef",
+			wantNote:    "peer left alone, priority 50 is not below benef at 50",
+		},
+		{
+			name: "a higher priority holder is passed over with a note",
+			cfg:  cfg(true, 4096, "ollama", map[string]int{"ollama": 50, "big": 90}),
+			obs: obs(8000,
+				releasable("ollama", 50, 100),
+				releasable("big", 90, 7000)),
+			wantSteps:   nil,
+			wantTrigger: TriggerReactive,
+			wantBenefit: "ollama",
+			wantNote:    "big left alone, priority 90 is not below ollama at 50",
 		},
 		{
 			name: "the default workload is defended when it is up",
@@ -311,7 +335,7 @@ func TestDecideGolden(t *testing.T) {
 			wantNote:    "there is no floor to defend",
 		},
 		{
-			name: "a service holding nothing is not evicted",
+			name: "a service holding nothing is not evicted, and says so",
 			cfg:  cfg(true, 2048, "", map[string]int{"ollama": 50, "comfyui": 20, "idle": 5}),
 			obs: obs(7188,
 				releasable("ollama", 50, 200),
@@ -320,6 +344,7 @@ func TestDecideGolden(t *testing.T) {
 			wantSteps:   []string{"comfyui:release"},
 			wantTrigger: TriggerReactive,
 			wantBenefit: "ollama",
+			wantNote:    "idle left alone, it holds no VRAM",
 		},
 	}
 
@@ -396,6 +421,70 @@ func TestExpectedFreeMiB(t *testing.T) {
 	if got, want := plan.ExpectedFreeMiB(), uint64(7188); got != want {
 		t.Errorf("ExpectedFreeMiB = %d, want %d", got, want)
 	}
+
+	// A service claiming more than the card holds must not make the plan
+	// promise more than the card has.
+	plan = Decide(cfg(true, 8000, "", map[string]int{"ollama": 90, "comfyui": 20}),
+		obs(354, releasable("ollama", 90, 100), releasable("comfyui", 20, 4096)))
+	if got, want := plan.ExpectedFreeMiB(), uint64(8188); got != want {
+		t.Errorf("ExpectedFreeMiB = %d, want it capped at the card's %d", got, want)
+	}
+}
+
+// Every service considered and passed over must appear in the notes with
+// its reason, one note per service, whichever reason dropped it.
+func TestEveryPassedOverServiceIsNoted(t *testing.T) {
+	c := cfg(true, 100000, "benef", map[string]int{"benef": 50, "peer": 50, "boss": 90, "down": 10, "broken": 10, "empty": 10})
+	plan := Decide(c, obs(354,
+		releasable("benef", 50, 100),
+		releasable("peer", 50, 3000),
+		releasable("boss", 90, 1000),
+		ServiceState{Name: "down", Priority: 10, Up: false, HeldMiB: 500, CanRelease: true},
+		ServiceState{Name: "broken", Priority: 10, Up: true, HeldMiB: 500, CanRelease: true, ProbeErr: "connection refused"},
+		releasable("empty", 10, 0)))
+	if plan.Beneficiary != "benef" {
+		t.Fatalf("beneficiary = %q, want benef, the default workload", plan.Beneficiary)
+	}
+	for _, want := range []string{
+		"peer left alone, priority 50 is not below benef at 50",
+		"boss left alone, priority 90 is not below benef at 50",
+		"down left alone, it is not running",
+		"broken left alone, its last probe failed: connection refused",
+		"empty left alone, it holds no VRAM",
+	} {
+		if !hasNote(plan, want) {
+			t.Errorf("no note %q\nnotes: %v", want, plan.Notes)
+		}
+	}
+	if hasNote(plan, "benef left alone") {
+		t.Errorf("the beneficiary was noted as passed over: %v", plan.Notes)
+	}
+	// down, broken and empty are all unusable, so the plan is rightly empty;
+	// the notes above are what keep that emptiness from being silent.
+	if !plan.Empty() {
+		t.Errorf("actions = %v, want none", steps(plan))
+	}
+}
+
+// The operator override is still a decision about a card, and without a
+// reading of that card it refuses like Decide does.
+func TestEvictRefusesWithoutGPUState(t *testing.T) {
+	o := Observation{
+		DeviceKnown: false,
+		DeviceErr:   "nvml device 0 memory: Unknown Error",
+		Services:    []ServiceState{releasable("ollama", 50, 3000), releasable("comfyui", 20, 2000)},
+	}
+	for name, plan := range map[string]Plan{
+		"evict":            Evict(o, []string{"ollama"}),
+		"evict all except": EvictAllExcept(o, "comfyui"),
+	} {
+		if !plan.Empty() {
+			t.Errorf("%s: actions = %v, want none without a GPU reading", name, steps(plan))
+		}
+		if !hasNote(plan, "GPU state could not be read, so no action is safe: nvml device 0 memory") {
+			t.Errorf("%s: notes = %v, want the refusal with its reason", name, plan.Notes)
+		}
+	}
 }
 
 func TestEvict(t *testing.T) {
@@ -459,6 +548,10 @@ func TestEvictAllExcept(t *testing.T) {
 		}
 		if !hasNote(plan, "is not in the config") {
 			t.Errorf("notes = %v, want an explanation", plan.Notes)
+		}
+		// The refusal still reports the real free figure, not zero.
+		if got, want := plan.CurrentFreeMiB, uint64(1188); got != want {
+			t.Errorf("CurrentFreeMiB = %d, want %d on the refusal plan", got, want)
 		}
 	})
 }
