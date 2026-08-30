@@ -178,7 +178,7 @@ Exit codes:
 | Code | Meaning |
 |---|---|
 | `0` | The command did what it says. For `request` this includes not getting all the room asked for: the last line says `freed X MiB of the Y MiB asked for`, and `--json` carries `target_met`. |
-| `1` | An error, or an executed action that failed (`N of M actions failed`). |
+| `1` | An error, or an executed action that failed (`N of M actions failed`). A daemon that took the request and then stopped answering or closed the connection is reported as `the daemon accepted the request but did not answer within Ns` or `the daemon closed the connection`, not as a missing daemon. |
 | `2` | No command, or an unknown command. |
 
 A claim made with `request` stands until you `release` it or the daemon
@@ -202,7 +202,8 @@ $XDG_CONFIG_HOME/gpu-bouncer/config.toml     (defaults to ~/.config)
 error rather than being ignored, because a misspelled policy key would silently
 change what the daemon is willing to do. So is a number outside its range: a
 negative `vram_floor_mib`, `min_effect_mib` or `gpu_index`, a duration of zero
-or less, or a `poll_interval` under `1s`. Only `priority` may be negative.
+or less, a `poll_interval` under `1s`, or a `drain_timeout` over `10m`. Only
+`priority` may be negative.
 
 ### `[policy]`
 
@@ -228,7 +229,7 @@ or less, or a `poll_interval` under `1s`. Only `priority` may be negative.
 | `priority` | `0` | Higher wins. Equal priority never evicts. |
 | `allow_stop` | `false` | Required before any process level action. |
 | `timeout` | `"5s"` | Bounds every request to this service. |
-| `drain_timeout` | `"30s"` | How long a release waits for the service to confirm the unload. Only `ollama` waits; a release still loaded when it expires is a failed action. |
+| `drain_timeout` | `"30s"` | How long a release waits for the service to confirm the unload, at most `"10m"`. Only `ollama` waits; a release still loaded when it expires is a failed action. |
 
 See [packaging/config.example.toml](packaging/config.example.toml) for a
 commented version.

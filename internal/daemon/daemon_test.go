@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -554,7 +557,7 @@ func TestListenRefusesASecondDaemon(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		_ = first.Serve(ctx, func(context.Context, ipc.Request) ipc.Response {
+		_ = first.Serve(ctx, func(context.Context, ipc.Request, func(ipc.Response)) ipc.Response {
 			return ipc.Response{OK: true}
 		})
 	}()
@@ -1258,4 +1261,176 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
+}
+
+// Four services that will not drain must cost one drain, not four. Run one
+// after another, `evict --all-except` on four stuck services outlasts any
+// fixed client deadline and the operator is told no daemon exists while the
+// daemon is busy doing exactly what was asked.
+func TestEvictAllExceptRunsItsActionsConcurrently(t *testing.T) {
+	const drain = 3 * time.Second
+
+	services := []config.Service{
+		{Name: "keeper", Adapter: config.AdapterOllama, Endpoint: (&fakeOllamaServer{}).start(t), Priority: 90},
+	}
+	stuck := make([]*fakeOllamaServer, 4)
+	for i := range stuck {
+		stuck[i] = &fakeOllamaServer{sticky: true}
+		stuck[i].loaded.Store(true)
+		services = append(services, config.Service{
+			Name:         fmt.Sprintf("stuck%d", i),
+			Adapter:      config.AdapterOllama,
+			Endpoint:     stuck[i].start(t),
+			Priority:     10,
+			Timeout:      config.Duration(time.Second),
+			DrainTimeout: config.Duration(drain),
+		})
+	}
+	cfg := config.Config{
+		Policy:   config.Policy{VRAMFloorMiB: 512, PollInterval: config.Duration(time.Hour)},
+		Services: services,
+	}
+	testDaemon(t, cfg, &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 5200}}, false)
+
+	start := time.Now()
+	resp, err := ipc.Exchange(context.Background(),
+		ipc.Request{Op: ipc.OpEvict, Service: "keeper", AllExcept: true, PlanFirst: true})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("evict --all-except: %v", err)
+	}
+	if len(resp.Executed) != len(stuck) {
+		t.Fatalf("%d results, want one per stuck service (%d): %+v", len(resp.Executed), len(stuck), resp.Executed)
+	}
+	for _, r := range resp.Executed {
+		if r.Error == "" {
+			t.Errorf("%s reported no error, want the drain to have timed out", r.Service)
+		}
+	}
+	// Four drains one after another would be 12s. One drain plus the request
+	// timeout either side of it is the whole cost when they overlap.
+	if elapsed > drain+2*time.Second {
+		t.Errorf("evict --all-except took %s for four %s drains, want about one drain", elapsed, drain)
+	}
+	for i, f := range stuck {
+		if got := f.unloadHit.Load(); got != 1 {
+			t.Errorf("stuck%d saw %d releases, want exactly 1", i, got)
+		}
+	}
+}
+
+// The client's wait is derived from the plan the daemon announces, so the
+// daemon has to announce one before it starts working.
+func TestTheDaemonAnnouncesItsPlanBeforeCarryingItOut(t *testing.T) {
+	stuck := &fakeOllamaServer{sticky: true}
+	stuck.loaded.Store(true)
+	cfg := config.Config{
+		Policy: config.Policy{VRAMFloorMiB: 512, PollInterval: config.Duration(time.Hour)},
+		Services: []config.Service{
+			{Name: "keeper", Adapter: config.AdapterOllama, Endpoint: (&fakeOllamaServer{}).start(t), Priority: 90},
+			{Name: "stuck", Adapter: config.AdapterOllama, Endpoint: stuck.start(t), Priority: 10,
+				Timeout: config.Duration(time.Second), DrainTimeout: config.Duration(2 * time.Second)},
+		},
+	}
+	socket := testDaemon(t, cfg, &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 5200}}, false)
+
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(time.Now().Add(20 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	req, _ := json.Marshal(ipc.Request{Op: ipc.OpEvict, Service: "stuck", PlanFirst: true})
+	if _, err := conn.Write(append(req, '\n')); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := bufio.NewReader(conn)
+	start := time.Now()
+	var first ipc.Response
+	if err := json.NewDecoder(reader).Decode(&first); err != nil {
+		t.Fatalf("first reply: %v", err)
+	}
+	announced := time.Since(start)
+	if !first.Preliminary {
+		t.Errorf("first reply is not marked preliminary: %+v", first)
+	}
+	if first.Plan == nil || len(first.Plan.Actions) != 1 {
+		t.Errorf("first reply carries %v, want the one action plan", first.Plan)
+	}
+	// The plan arrives before the work, not after it.
+	if announced > time.Second {
+		t.Errorf("the plan arrived after %s, want it before the 2s drain began", announced)
+	}
+	if want := (time.Second + 2*time.Second).Milliseconds(); first.LongestActionMS != want {
+		t.Errorf("longest_action_ms = %d, want timeout plus drain_timeout = %d", first.LongestActionMS, want)
+	}
+
+	var final ipc.Response
+	if err := json.NewDecoder(reader).Decode(&final); err != nil {
+		t.Fatalf("final reply: %v", err)
+	}
+	if final.Preliminary || len(final.Executed) != 1 {
+		t.Errorf("final reply = %+v, want the results", final)
+	}
+}
+
+// A client that did not ask for the plan gets one reply, as every 0.1.2
+// client does.
+func TestAClientThatDidNotAskGetsOneReply(t *testing.T) {
+	stuck := &fakeOllamaServer{sticky: true}
+	stuck.loaded.Store(true)
+	cfg := config.Config{
+		Policy: config.Policy{VRAMFloorMiB: 512, PollInterval: config.Duration(time.Hour)},
+		Services: []config.Service{
+			{Name: "keeper", Adapter: config.AdapterOllama, Endpoint: (&fakeOllamaServer{}).start(t), Priority: 90},
+			{Name: "stuck", Adapter: config.AdapterOllama, Endpoint: stuck.start(t), Priority: 10,
+				Timeout: config.Duration(time.Second), DrainTimeout: config.Duration(time.Second)},
+		},
+	}
+	testDaemon(t, cfg, &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 5200}}, false)
+
+	resp := call(t, ipc.Request{Op: ipc.OpEvict, Service: "stuck"})
+	if resp.Preliminary {
+		t.Error("a client that did not set plan_first was sent a preliminary reply")
+	}
+	if len(resp.Executed) != 1 {
+		t.Errorf("executed = %+v, want the one result", resp.Executed)
+	}
+}
+
+// A connection must stay open for as long as the work it carries can take.
+// The old flat two minutes cut off any plan with a drain over that.
+func TestConnBudgetFollowsTheLongestAction(t *testing.T) {
+	tests := []struct {
+		name     string
+		services []config.Service
+		want     time.Duration
+	}{
+		{
+			name: "no services still gets the flat floor plus room to probe",
+			want: ipc.PlanWait + time.Minute,
+		},
+		{
+			name: "the longest drain a config may set outlasts the old two minute cap",
+			services: []config.Service{
+				{Name: "a", Timeout: config.Duration(5 * time.Second), DrainTimeout: config.Duration(30 * time.Second)},
+				{Name: "b", Timeout: config.Duration(5 * time.Second), DrainTimeout: config.Duration(config.MaxDrainTimeout)},
+			},
+			want: config.MaxDrainTimeout + 5*time.Second + ipc.ClientSlack + time.Minute,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &Daemon{cfg: config.Config{Services: tt.services}}
+			if got := d.connBudget(); got != tt.want {
+				t.Errorf("connBudget() = %s, want %s", got, tt.want)
+			}
+			if d.connBudget() <= 2*time.Minute {
+				t.Errorf("connBudget() = %s, want more than the old flat two minutes", d.connBudget())
+			}
+		})
+	}
 }

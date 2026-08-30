@@ -42,8 +42,11 @@ type actionOutput struct {
 	Message  string             `json:"message,omitempty"`
 	Plan     scheduler.Plan     `json:"plan"`
 	Executed []ipc.ActionResult `json:"executed"`
+	// FreeAfterMiB is the GPU's free VRAM read once after every action had
+	// finished, or null when nothing ran or the reading failed.
+	FreeAfterMiB *uint64 `json:"free_after_mib"`
 	// TargetMet is present on a request only: whether the free VRAM
-	// measured after the last action reached the target.
+	// measured after every action reached the target.
 	TargetMet *bool `json:"target_met,omitempty"`
 }
 
@@ -106,11 +109,12 @@ func outputOf(op ipc.Op, r ipc.Response) any {
 		return releaseOutput{OK: r.OK, Message: r.Message}
 	}
 	out := actionOutput{
-		OK:       r.OK,
-		Error:    r.Error,
-		Message:  r.Message,
-		Plan:     planOf(r.Plan),
-		Executed: orEmpty(r.Executed),
+		OK:           r.OK,
+		Error:        r.Error,
+		Message:      r.Message,
+		Plan:         planOf(r.Plan),
+		Executed:     orEmpty(r.Executed),
+		FreeAfterMiB: r.FreeAfterMiB,
 	}
 	if op == ipc.OpRequest {
 		out.TargetMet = r.TargetMet

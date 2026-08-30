@@ -400,13 +400,20 @@ func oneService(args []string, command string) (string, error) {
 // daemon rather than acting directly: the daemon is the single place that
 // holds the config saying which services may be touched.
 func callDaemon(ctx context.Context, g *globals, env Env, req ipc.Request) error {
-	ctx, cancel := context.WithTimeout(ctx, probeTimeout+time.Minute)
-	defer cancel()
-
-	resp, err := ipc.Do(ctx, req)
+	// The daemon answers with the plan before carrying it out, so the wait
+	// is sized from the work rather than from a guess. There is no context
+	// deadline here for that reason: a plan whose longest drain is ten
+	// minutes is waited out, and a daemon that goes quiet is not.
+	req.PlanFirst = true
+	resp, err := ipc.Exchange(ctx, req)
 	if err != nil {
-		return fmt.Errorf("%w\nStart one with \"gpu-bouncer daemon\", or enable the service. "+
-			"status and plan work without a daemon", err)
+		if errors.Is(err, ipc.ErrNoDaemon) {
+			return fmt.Errorf("%w\nStart one with \"gpu-bouncer daemon\", or enable the service. "+
+				"status and plan work without a daemon", err)
+		}
+		// A daemon took the request. Telling the operator to start one
+		// would be wrong, and starting a second one would be worse.
+		return err
 	}
 	if resp.Error != "" {
 		return fmt.Errorf("%s", resp.Error)
@@ -456,8 +463,15 @@ func shortfallLine(resp ipc.Response) string {
 	}
 	asked := plan.TargetFreeMiB - plan.CurrentFreeMiB
 	var freed uint64
+	// The actions overlap, so only the reading the daemon takes once they
+	// have all finished measures the plan as a whole. A daemon that sent
+	// none leaves the last action's own figure, which is what an older one
+	// reports.
 	if n := len(resp.Executed); n > 0 {
 		first, last := resp.Executed[0].FreeBeforeMiB, resp.Executed[n-1].FreeAfterMiB
+		if resp.FreeAfterMiB != nil {
+			last = *resp.FreeAfterMiB
+		}
 		if last > first {
 			freed = last - first
 		}
