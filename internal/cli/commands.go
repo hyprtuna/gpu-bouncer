@@ -233,11 +233,16 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 
 	// The daemon is not needed for status, but whether one is running changes
 	// what the other commands will do, so it is worth a line.
-	daemonUp, daemonDry := false, false
+	daemonUp := false
+	// daemonDry is a pointer because there are three answers, not two: yes,
+	// no, and a daemon older than this client that does not say. Reading the
+	// absence as "no" reported a dry-run daemon as one that acts, which is
+	// the one wrong answer here that matters.
+	var daemonDry *bool
 	var configNote string
 	if resp, err := ipc.Do(ctx, ipc.Request{Op: ipc.OpPing}); err == nil && resp.OK {
 		daemonUp = true
-		daemonDry = resp.DaemonDryRun != nil && *resp.DaemonDryRun
+		daemonDry = resp.DaemonDryRun
 		if claims, err := ipc.Do(ctx, ipc.Request{Op: ipc.OpStatus}); err == nil {
 			report.Claims = claims.Claims
 			report.Cooldowns = claims.Cooldowns
@@ -248,12 +253,13 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 		if resp.DaemonConfig != nil {
 			report.DaemonConfig = resp.DaemonConfig
 			report.ConfigStale, configNote = configDrift(*resp.DaemonConfig)
+		} else {
+			configNote = "the daemon is older than this client and does not report which config it loaded, " +
+				"so whether it is running on an older edit cannot be told"
 		}
 	}
 	report.DaemonRunning = &daemonUp
-	if daemonUp {
-		report.DaemonDryRun = &daemonDry
-	}
+	report.DaemonDryRun = daemonDry
 	report.Config = json.RawMessage("null")
 	if len(cfg.Sources) > 0 {
 		report.Config, _ = json.Marshal(strings.Join(cfg.Sources, ", "))
@@ -550,7 +556,7 @@ func gpuHeading(g ipc.GPUReport) string {
 	return heading
 }
 
-func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, daemonUp, daemonDry bool, configNote string) {
+func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, daemonUp bool, daemonDry *bool, configNote string) {
 	out := env.Stdout
 
 	switch {
@@ -660,7 +666,10 @@ func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, d
 	}
 
 	switch {
-	case daemonUp && daemonDry:
+	case daemonUp && daemonDry == nil:
+		fmt.Fprintln(out, "A daemon is running. It is older than this client and does not report "+
+			"whether it is in dry-run mode, so it may be planning and never acting.")
+	case daemonUp && *daemonDry:
 		fmt.Fprintln(out, "A daemon is running in dry-run mode: it plans and never acts.")
 	case daemonUp:
 		fmt.Fprintln(out, "A daemon is running.")

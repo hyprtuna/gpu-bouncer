@@ -180,6 +180,19 @@ func shortDir(t *testing.T) string {
 }
 
 func run(args ...string) (code int, stdout, stderr string) {
+	// Main threads --config through the environment, which is harmless in a
+	// process that runs one command and exits, but inside one test binary it
+	// would leak from one test into the next and quietly point a later test
+	// at an earlier one's config file.
+	previous, had := os.LookupEnv(config.EnvConfig)
+	defer func() {
+		if had {
+			_ = os.Setenv(config.EnvConfig, previous)
+			return
+		}
+		_ = os.Unsetenv(config.EnvConfig)
+	}()
+
 	var out, errOut bytes.Buffer
 	code = Main(args, Env{Stdout: &out, Stderr: &errOut})
 	return code, out.String(), errOut.String()

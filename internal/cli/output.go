@@ -21,8 +21,10 @@ type statusOutput struct {
 	Claims        []ipc.ClaimReport    `json:"claims"`
 	Cooldowns     []ipc.CooldownReport `json:"cooldowns"`
 	DaemonRunning bool                 `json:"daemon_running"`
-	DaemonDryRun  bool                 `json:"daemon_dry_run"`
-	DaemonConfig  *ipc.ConfigReport    `json:"daemon_config"`
+	// DaemonDryRun is null when the daemon is too old to report it. A daemon
+	// that plans and never acts must never be reported as one that acts.
+	DaemonDryRun *bool             `json:"daemon_dry_run"`
+	DaemonConfig *ipc.ConfigReport `json:"daemon_config"`
 	// ConfigStale is null when the answer is not known: no daemon answered,
 	// the daemon is too old to report what it loaded, or one of the files it
 	// loaded cannot be read now.
@@ -103,9 +105,7 @@ func statusOutputOf(r ipc.Response) statusOutput {
 	if r.DaemonRunning != nil {
 		out.DaemonRunning = *r.DaemonRunning
 	}
-	if r.DaemonDryRun != nil {
-		out.DaemonDryRun = *r.DaemonDryRun
-	}
+	out.DaemonDryRun = r.DaemonDryRun
 	out.ConfigStale = r.ConfigStale
 	if len(r.Config) > 0 && string(r.Config) != "null" {
 		var path string
