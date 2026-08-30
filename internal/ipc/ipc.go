@@ -20,6 +20,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/hyprtuna/gpu-bouncer/internal/gpu"
@@ -262,6 +263,10 @@ type Listener struct {
 	listener net.Listener
 }
 
+// afterBind, when set by a test, observes the socket between bind and chmod,
+// which is the window whose mode the mode guarantee is about.
+var afterBind func(path string)
+
 // maxSocketPath is the usable length of a Unix socket path. The kernel's
 // sockaddr_un holds 108 bytes including the terminator, and a path over that
 // fails with a bare "invalid argument" that says nothing about the cause.
@@ -293,10 +298,25 @@ func Listen(path string) (*Listener, error) {
 		}
 	}
 
+	// bind(2) creates the socket at 0777 masked by the process umask, so a
+	// chmod afterwards leaves a window in which a permissive umask (a unit
+	// with UMask=0000, a shell after umask 0) makes the socket world
+	// connectable. The umask is set so that the socket is 0660 from the
+	// instant it exists, then restored. The umask is process wide, and
+	// Listen runs once at startup before anything else creates files, so the
+	// restriction is not observed by any other code.
+	old := syscall.Umask(0o777 &^ socketMode)
 	ln, err := net.Listen("unix", path)
+	syscall.Umask(old)
 	if err != nil {
 		return nil, fmt.Errorf("listen on %s: %w", path, err)
 	}
+	if afterBind != nil {
+		afterBind(path)
+	}
+	// The chmod stays as the second line: it corrects the mode on a system
+	// whose bind ignores the umask, and it costs nothing on one that honours
+	// it, because the mode is already what it is being set to.
 	if err := os.Chmod(path, socketMode); err != nil {
 		_ = ln.Close()
 		return nil, fmt.Errorf("set permissions on %s: %w", path, err)
