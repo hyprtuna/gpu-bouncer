@@ -101,27 +101,27 @@ type Observation struct {
 
 // Action is one thing to do to one service.
 type Action struct {
-	Service string
-	Verb    Verb
-	Reason  string
+	Service string `json:"service"`
+	Verb    Verb   `json:"verb"`
+	Reason  string `json:"reason"`
 	// ExpectFreeMiB is how much VRAM this action is expected to release. It is
 	// an expectation, not a promise: the daemon logs the measured before and
 	// after figures separately.
-	ExpectFreeMiB uint64
+	ExpectFreeMiB uint64 `json:"expect_free_mib"`
 }
 
 // Plan is the scheduler's complete answer, including what it decided not to do.
 type Plan struct {
-	Trigger Trigger
+	Trigger Trigger `json:"trigger"`
 	// Beneficiary is the service the plan is freeing memory for, if any.
-	Beneficiary string
+	Beneficiary string `json:"beneficiary"`
 	// CurrentFreeMiB and TargetFreeMiB frame the decision.
-	CurrentFreeMiB uint64
-	TargetFreeMiB  uint64
-	Actions        []Action
+	CurrentFreeMiB uint64   `json:"current_free_mib"`
+	TargetFreeMiB  uint64   `json:"target_free_mib"`
+	Actions        []Action `json:"actions"`
 	// Notes record every service considered and passed over, and why. They
 	// exist so that an empty plan is never silent.
-	Notes []string
+	Notes []string `json:"notes"`
 }
 
 // deviceUnknownNote is the one reason every plan gives for refusing without a

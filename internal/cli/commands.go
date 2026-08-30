@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"time"
@@ -21,23 +24,45 @@ import (
 // from the config still applies inside it.
 const probeTimeout = 30 * time.Second
 
-func newFlagSet(name string, env Env) *flag.FlagSet {
-	fs := flag.NewFlagSet("gpu-bouncer "+name, flag.ContinueOnError)
-	fs.SetOutput(env.Stderr)
-	return fs
+// flagSet is a flag.FlagSet whose own output is silenced. The flag package
+// prints a parse error and a usage dump before returning the error, which
+// would report every mistake twice; here the error is reported once by Main,
+// and the usage is printed only for --help, by parseArgs.
+type flagSet struct {
+	*flag.FlagSet
+	env Env
 }
 
-// addOutputFlags lets --json and --verbose be given after the command name as
-// well as before it. They are global flags, but "gpu-bouncer status --json" is
-// what people type, and rejecting it teaches nothing.
-func addOutputFlags(fs *flag.FlagSet, g *globals) {
+func newFlagSet(name string, env Env) *flagSet {
+	fs := flag.NewFlagSet("gpu-bouncer "+name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
+	return &flagSet{FlagSet: fs, env: env}
+}
+
+// printHelp writes the command's flags to stdout, the way flag's own default
+// usage would, minus the copy it prints on errors.
+func (fs *flagSet) printHelp() {
+	var buf bytes.Buffer
+	fs.SetOutput(&buf)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
+	fmt.Fprintf(fs.env.Stdout, "Usage of %s:\n%s", fs.Name(), buf.String())
+}
+
+// addOutputFlags lets --json, --verbose and --dry-run be given after the
+// command name as well as before it. They are global flags, but
+// "gpu-bouncer status --json" is what people type, and rejecting it teaches
+// nothing. On a command where one of them has no effect it is a no op.
+func addOutputFlags(fs *flagSet, g *globals) {
 	fs.BoolVar(&g.asJSON, "json", g.asJSON, "emit JSON")
 	fs.BoolVar(&g.verbose, "verbose", g.verbose, "include per service reasoning")
 	fs.BoolVar(&g.verbose, "v", g.verbose, "include per service reasoning")
+	fs.BoolVar(&g.dryRun, "dry-run", g.dryRun, "do not change anything")
 }
 
 // noPositionals parses a command that takes no arguments of its own.
-func noPositionals(fs *flag.FlagSet, args []string, command string) error {
+func noPositionals(fs *flagSet, args []string, command string) error {
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -57,10 +82,13 @@ func noPositionals(fs *flag.FlagSet, args []string, command string) error {
 // loop and peeling off one positional per pass keeps the flag package's own
 // knowledge of which flags take a value, so a value that looks like a
 // positional is never mistaken for one.
-func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+func parseArgs(fs *flagSet, args []string) ([]string, error) {
 	var positional []string
 	for {
 		if err := fs.Parse(args); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				fs.printHelp()
+			}
 			return nil, err
 		}
 		rest := fs.Args()
@@ -74,11 +102,12 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 
 // runDaemon runs the arbitration service in the foreground. systemd supervises
 // it; it does not daemonise itself.
-func runDaemon(ctx context.Context, args []string, g globals, env Env) error {
+func runDaemon(ctx context.Context, args []string, g *globals, env Env) error {
 	fs := newFlagSet("daemon", env)
 	socket := fs.String("socket", "", "control socket path (defaults to the standard location)")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
-	if err := fs.Parse(args); err != nil {
+	addOutputFlags(fs, g)
+	if err := noPositionals(fs, args, "daemon"); err != nil {
 		return err
 	}
 
@@ -116,9 +145,9 @@ func runDaemon(ctx context.Context, args []string, g globals, env Env) error {
 
 // runStatus reads GPU and service state directly. It never needs the daemon,
 // so it is safe on a machine where gpu-bouncer is only installed, not running.
-func runStatus(ctx context.Context, args []string, g globals, env Env) error {
+func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 	fs := newFlagSet("status", env)
-	addOutputFlags(fs, &g)
+	addOutputFlags(fs, g)
 	if err := noPositionals(fs, args, "status"); err != nil {
 		return err
 	}
@@ -202,6 +231,11 @@ func runStatus(ctx context.Context, args []string, g globals, env Env) error {
 			report.Claims = claims.Claims
 		}
 	}
+	report.DaemonRunning = &daemonUp
+	report.Config = json.RawMessage("null")
+	if len(cfg.Sources) > 0 {
+		report.Config, _ = json.Marshal(strings.Join(cfg.Sources, ", "))
+	}
 
 	if g.asJSON {
 		return writeJSON(env, report)
@@ -212,9 +246,9 @@ func runStatus(ctx context.Context, args []string, g globals, env Env) error {
 
 // runPlan shows what would happen now. It asks the daemon when one is running,
 // because only the daemon knows the outstanding claims.
-func runPlan(ctx context.Context, args []string, g globals, env Env) error {
+func runPlan(ctx context.Context, args []string, g *globals, env Env) error {
 	fs := newFlagSet("plan", env)
-	addOutputFlags(fs, &g)
+	addOutputFlags(fs, g)
 	if err := noPositionals(fs, args, "plan"); err != nil {
 		return err
 	}
@@ -254,10 +288,10 @@ func runPlan(ctx context.Context, args []string, g globals, env Env) error {
 }
 
 // runRequest claims priority for a service.
-func runRequest(ctx context.Context, args []string, g globals, env Env) error {
+func runRequest(ctx context.Context, args []string, g *globals, env Env) error {
 	fs := newFlagSet("request", env)
 	needMiB := fs.Uint64("need-mib", 0, "free VRAM wanted in MiB (default: the policy floor)")
-	dryRun := fs.Bool("dry-run", false, "do not change anything")
+	addOutputFlags(fs, g)
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -267,14 +301,14 @@ func runRequest(ctx context.Context, args []string, g globals, env Env) error {
 		return err
 	}
 	return callDaemon(ctx, g, env, ipc.Request{
-		Op: ipc.OpRequest, Service: service, NeedMiB: *needMiB, DryRun: g.dryRun || *dryRun,
+		Op: ipc.OpRequest, Service: service, NeedMiB: *needMiB, DryRun: g.dryRun,
 	})
 }
 
 // runReleaseClaim drops a claim. It does not itself free any VRAM.
-func runReleaseClaim(ctx context.Context, args []string, g globals, env Env) error {
+func runReleaseClaim(ctx context.Context, args []string, g *globals, env Env) error {
 	fs := newFlagSet("release", env)
-	dryRun := fs.Bool("dry-run", false, "do not change anything")
+	addOutputFlags(fs, g)
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -284,21 +318,21 @@ func runReleaseClaim(ctx context.Context, args []string, g globals, env Env) err
 		return err
 	}
 	return callDaemon(ctx, g, env, ipc.Request{
-		Op: ipc.OpRelease, Service: service, DryRun: g.dryRun || *dryRun,
+		Op: ipc.OpRelease, Service: service, DryRun: g.dryRun,
 	})
 }
 
 // runEvict frees named services now.
-func runEvict(ctx context.Context, args []string, g globals, env Env) error {
+func runEvict(ctx context.Context, args []string, g *globals, env Env) error {
 	fs := newFlagSet("evict", env)
 	allExcept := fs.String("all-except", "", "free every configured service except this one")
-	dryRun := fs.Bool("dry-run", false, "do not change anything")
+	addOutputFlags(fs, g)
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
 
-	req := ipc.Request{Op: ipc.OpEvict, DryRun: g.dryRun || *dryRun}
+	req := ipc.Request{Op: ipc.OpEvict, DryRun: g.dryRun}
 	switch {
 	case *allExcept != "" && len(positional) > 0:
 		return fmt.Errorf("give either a service name or --all-except, not both")
@@ -312,6 +346,21 @@ func runEvict(ctx context.Context, args []string, g globals, env Env) error {
 		req.Service = service
 	}
 	return callDaemon(ctx, g, env, req)
+}
+
+// runVersion prints the version. It parses flags like every other command,
+// so "version --help" explains itself and "version foo" is refused.
+func runVersion(args []string, g *globals, env Env) error {
+	fs := newFlagSet("version", env)
+	addOutputFlags(fs, g)
+	if err := noPositionals(fs, args, "version"); err != nil {
+		return err
+	}
+	if g.asJSON {
+		return writeJSON(env, map[string]string{"version": Version})
+	}
+	fmt.Fprintf(env.Stdout, "gpu-bouncer %s\n", Version)
+	return nil
 }
 
 func oneService(args []string, command string) (string, error) {
@@ -328,7 +377,7 @@ func oneService(args []string, command string) (string, error) {
 // callDaemon sends a mutating request. These commands refuse to work without a
 // daemon rather than acting directly: the daemon is the single place that
 // holds the config saying which services may be touched.
-func callDaemon(ctx context.Context, g globals, env Env, req ipc.Request) error {
+func callDaemon(ctx context.Context, g *globals, env Env, req ipc.Request) error {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout+time.Minute)
 	defer cancel()
 
@@ -340,10 +389,35 @@ func callDaemon(ctx context.Context, g globals, env Env, req ipc.Request) error 
 	if resp.Error != "" {
 		return fmt.Errorf("%s", resp.Error)
 	}
-	if g.asJSON {
-		return writeJSON(env, resp)
+
+	// An action that failed is a failed command, however many others went
+	// through: a script that asked for room and did not get it must find
+	// out from the exit code. An action the daemon declined with a reason,
+	// for example a busy ComfyUI, carries no error and is not a failure.
+	failed := 0
+	for _, r := range resp.Executed {
+		if r.Error != "" {
+			failed++
+		}
 	}
-	printOutcome(env, resp, g.verbose)
+	if failed > 0 {
+		resp.OK = false
+		resp.Error = fmt.Sprintf("%d of %d actions failed", failed, len(resp.Executed))
+	}
+
+	if g.asJSON {
+		if err := writeJSON(env, resp); err != nil {
+			return err
+		}
+	} else {
+		printOutcome(env, resp, g.verbose)
+		if failed > 0 {
+			fmt.Fprintln(env.Stdout, resp.Error)
+		}
+	}
+	if failed > 0 {
+		return exitCode(1)
+	}
 	return nil
 }
 

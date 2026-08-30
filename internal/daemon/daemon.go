@@ -351,6 +351,9 @@ func (d *Daemon) handleReleaseClaim(req ipc.Request) ipc.Response {
 	if req.Service == "" {
 		return ipc.Response{Error: "release needs a service name"}
 	}
+	if _, ok := d.cfg.Service(req.Service); !ok {
+		return ipc.Response{Error: fmt.Sprintf("service %q is not in the config", req.Service)}
+	}
 	if req.DryRun || d.dryRun {
 		d.mu.Lock()
 		_, had := d.claims[req.Service]
@@ -375,6 +378,12 @@ func (d *Daemon) handleReleaseClaim(req ipc.Request) ipc.Response {
 func (d *Daemon) handleEvict(ctx context.Context, req ipc.Request) ipc.Response {
 	if req.Service == "" {
 		return ipc.Response{Error: "evict needs a service name"}
+	}
+	if _, ok := d.cfg.Service(req.Service); !ok {
+		// A typo must be visible to a script, so this is an error and not
+		// an empty plan. For --all-except it is also the guard that keeps a
+		// typo from clearing the GPU.
+		return ipc.Response{Error: fmt.Sprintf("service %q is not in the config", req.Service)}
 	}
 	obs := d.observation(ctx)
 
