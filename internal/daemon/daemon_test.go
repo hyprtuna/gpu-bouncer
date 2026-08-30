@@ -820,3 +820,48 @@ func TestDaemonRefusesIndexBeyondDeviceCount(t *testing.T) {
 		t.Errorf("error = %q, want it to contain %q", err, want)
 	}
 }
+
+// A daemon started with --dry-run never acts, so it must never record a claim
+// either: a claim it cannot act on would be listed by status until restart and
+// could never be released.
+func TestDryRunDaemonRecordsNoClaim(t *testing.T) {
+	url := (&fakeOllamaServer{}).start(t)
+	hardware := &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 100}}
+	testDaemon(t, twoServiceConfig(url, false), hardware, true)
+
+	resp := call(t, ipc.Request{Op: ipc.OpRequest, Service: "comfyui", NeedMiB: 100})
+	if !resp.OK || resp.Plan == nil {
+		t.Fatalf("request = %+v, want a plan", resp)
+	}
+	if !strings.Contains(resp.Message, "dry-run mode") || !strings.Contains(resp.Message, "no claim was recorded") {
+		t.Errorf("message = %q, want it to say the daemon is in dry-run mode and recorded nothing", resp.Message)
+	}
+
+	status := call(t, ipc.Request{Op: ipc.OpStatus})
+	if len(status.Claims) != 0 {
+		t.Errorf("claims = %+v, want none from a dry-run daemon", status.Claims)
+	}
+	if status.DaemonDryRun == nil || !*status.DaemonDryRun {
+		t.Errorf("daemon_dry_run = %v, want true", status.DaemonDryRun)
+	}
+	ping := call(t, ipc.Request{Op: ipc.OpPing})
+	if ping.DaemonDryRun == nil || !*ping.DaemonDryRun {
+		t.Errorf("ping daemon_dry_run = %v, want true", ping.DaemonDryRun)
+	}
+
+	release := call(t, ipc.Request{Op: ipc.OpRelease, Service: "comfyui"})
+	if !release.OK || !strings.Contains(release.Message, "nothing to release") {
+		t.Errorf("release = %+v, want an ok reply saying there is nothing to release", release)
+	}
+}
+
+// A normal daemon reports daemon_dry_run false, so a consumer can tell the two
+// apart without parsing text.
+func TestNormalDaemonReportsDryRunFalse(t *testing.T) {
+	url := (&fakeOllamaServer{}).start(t)
+	testDaemon(t, twoServiceConfig(url, false), &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192}}, false)
+	ping := call(t, ipc.Request{Op: ipc.OpPing})
+	if ping.DaemonDryRun == nil || *ping.DaemonDryRun {
+		t.Errorf("daemon_dry_run = %v, want false", ping.DaemonDryRun)
+	}
+}

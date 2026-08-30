@@ -324,7 +324,8 @@ func (d *Daemon) logAction(r ipc.ActionResult) {
 func (d *Daemon) handle(ctx context.Context, req ipc.Request) ipc.Response {
 	switch req.Op {
 	case ipc.OpPing:
-		return ipc.Response{OK: true, Message: "gpu-bouncer daemon is running"}
+		dry := d.dryRun
+		return ipc.Response{OK: true, Message: "gpu-bouncer daemon is running", DaemonDryRun: &dry}
 	case ipc.OpStatus:
 		return d.handleStatus(ctx)
 	case ipc.OpPlan:
@@ -341,7 +342,8 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request) ipc.Response {
 }
 
 func (d *Daemon) handleStatus(ctx context.Context) ipc.Response {
-	resp := ipc.Response{OK: true}
+	dry := d.dryRun
+	resp := ipc.Response{OK: true, DaemonDryRun: &dry}
 	device, err := d.observer.Device(ctx)
 	report := ipc.GPUReportOf(device, "")
 	if err != nil {
@@ -402,8 +404,13 @@ func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request) ipc.Respons
 		return ipc.Response{Error: fmt.Sprintf("service %q is not in the config", req.Service)}
 	}
 
+	// A dry run, whether the request's own or the daemon's, must not leave a
+	// claim behind: a claim a dry-run daemon can never act on would still be
+	// listed by status and could never be released. The plan it reports is
+	// still the one the real request would produce.
+	dryRun := req.DryRun || d.dryRun
 	claim := scheduler.Claim{Service: req.Service, NeedMiB: req.NeedMiB, At: time.Now()}
-	if !req.DryRun {
+	if !dryRun {
 		d.mu.Lock()
 		d.claims[req.Service] = claim
 		d.mu.Unlock()
@@ -411,9 +418,7 @@ func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request) ipc.Respons
 	}
 
 	obs := d.observer.Observe(ctx)
-	if req.DryRun {
-		// A dry run must not leave a claim behind, but the plan it reports has
-		// to be the one the real request would produce.
+	if dryRun {
 		obs.Claims = append(d.snapshotClaims(), claim)
 	} else {
 		obs.Claims = d.snapshotClaims()
@@ -421,7 +426,11 @@ func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request) ipc.Respons
 
 	plan := scheduler.Decide(d.cfg, obs)
 	resp := ipc.Response{OK: true, Plan: &plan}
-	if req.DryRun || d.dryRun {
+	if d.dryRun {
+		resp.Message = "the daemon is running in dry-run mode: it plans and never acts, so no claim was recorded"
+		return resp
+	}
+	if req.DryRun {
 		resp.Message = "dry run, nothing was done"
 		return resp
 	}
@@ -436,7 +445,11 @@ func (d *Daemon) handleReleaseClaim(req ipc.Request) ipc.Response {
 	if _, ok := d.cfg.Service(req.Service); !ok {
 		return ipc.Response{Error: fmt.Sprintf("service %q is not in the config", req.Service)}
 	}
-	if req.DryRun || d.dryRun {
+	if d.dryRun {
+		// A dry-run daemon records no claims, so there is never one to drop.
+		return ipc.Response{OK: true, Message: "the daemon is running in dry-run mode: it holds no claims, so there is nothing to release"}
+	}
+	if req.DryRun {
 		d.mu.Lock()
 		_, had := d.claims[req.Service]
 		d.mu.Unlock()

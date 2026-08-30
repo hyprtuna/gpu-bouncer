@@ -130,6 +130,11 @@ type Response struct {
 	Cooldowns []CooldownReport `json:"cooldowns,omitempty"`
 	Message   string           `json:"message,omitempty"`
 
+	// DaemonDryRun is set by the daemon on ping and status replies: true when
+	// it was started with --dry-run and therefore plans but never acts and
+	// records no claims.
+	DaemonDryRun *bool `json:"daemon_dry_run,omitempty"`
+
 	// DaemonRunning and Config are filled by the status command only, which
 	// reuses this type as its report. Config is the path the configuration
 	// came from, or JSON null when no file was found.
