@@ -77,6 +77,15 @@ jobs:
           top="$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?\]' CHANGELOG.md | sed -e 's/^## \[//' -e 's/\]$//')"
           .github/scripts/release-notes.sh "v$top" CHANGELOG.md >/dev/null
 
+      # INSTALL.md tells a reader which tarball to download and which
+      # checksum to verify. At the v0.1.2 tag it still named v0.1.1, so the
+      # block worked and verified the wrong release. This fails the gate on
+      # the pull request and again on the tag, before anything is published.
+      - name: INSTALL.md names the release being made
+        run: |
+          .github/scripts/install-version_test.sh
+          .github/scripts/install-version.sh INSTALL.md CHANGELOG.md
+
       - name: no em or en dashes
         run: |
           if git grep -nP '\x{2014}|\x{2013}' -- .; then

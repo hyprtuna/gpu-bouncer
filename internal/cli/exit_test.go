@@ -831,3 +831,50 @@ func TestLongNamesAreElided(t *testing.T) {
 		}
 	}
 }
+
+// Every list is present and empty as [], at every level. The top level was
+// guaranteed in 0.1.2; services[].items is a list too and was absent.
+func TestNestedListsArePresentAndEmpty(t *testing.T) {
+	startDaemonFromFile(t, "[policy]\npoll_interval = \"1h\"\n[[service]]\nname = \"empty\"\nadapter = \"ollama\"\nendpoint = \""+
+		fakeOllamaEmpty(t)+"\"\n")
+	_, stdout, _ := run("--json", "status")
+
+	var decoded struct {
+		Services []map[string]json.RawMessage `json:"services"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("stdout is not JSON: %v", err)
+	}
+	if len(decoded.Services) != 1 {
+		t.Fatalf("services = %v, want one", decoded.Services)
+	}
+	items, present := decoded.Services[0]["items"]
+	if !present {
+		t.Fatalf("services[0] has no items key: %v", decoded.Services[0])
+	}
+	if string(items) != "[]" {
+		t.Errorf("services[0].items = %s, want []", items)
+	}
+	// The nested strings are the documented exception: absent when unset.
+	for _, key := range []string{"error"} {
+		if _, unexpected := decoded.Services[0][key]; unexpected {
+			t.Errorf("services[0] carries %s on a healthy service: %v", key, decoded.Services[0][key])
+		}
+	}
+}
+
+// fakeOllamaEmpty is an Ollama that is up and holding nothing, so its items
+// list is empty rather than merely short.
+func fakeOllamaEmpty(t *testing.T) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/version", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"version":"0.33.2"}`)
+	})
+	mux.HandleFunc("/api/ps", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"models":[]}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
