@@ -358,9 +358,9 @@ func runVersion(args []string, g *globals, env Env) error {
 		return err
 	}
 	if g.asJSON {
-		return writeJSON(env, map[string]string{"version": Version})
+		return writeJSON(env, map[string]string{"version": version()})
 	}
-	fmt.Fprintf(env.Stdout, "gpu-bouncer %s\n", Version)
+	fmt.Fprintf(env.Stdout, "gpu-bouncer %s\n", version())
 	return nil
 }
 

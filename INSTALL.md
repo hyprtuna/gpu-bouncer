@@ -29,16 +29,18 @@ The `/cmd/gpu-bouncer` suffix is required: the module root holds no main
 package. The binary lands in `$(go env GOPATH)/bin`, which is `~/go/bin`
 unless you have changed it. Put that directory on your `PATH`.
 
-A binary installed this way reports its version as `dev`:
+A binary installed this way reports the module version Go recorded in it:
 
 ```
 $ gpu-bouncer version
-gpu-bouncer dev
+gpu-bouncer v0.1.1
 ```
 
-The version string is stamped at link time and `go install` does not pass the
-link flag. Use a release binary, or the `-ldflags` line under
-[Build from source](#build-from-source), if you want a real version number.
+`gpu-bouncer --version` prints the same line. A plain `go build` in a git
+checkout reports what Go records for it, the nearest tag or a pseudo-version
+such as `v0.1.1-0.20260830102548-6beb4269d63d+dirty`; a build from a tree
+with no git history reports `gpu-bouncer dev`. The `-ldflags` line under
+[Build from source](#build-from-source) stamps an exact version either way.
 
 ## Install from a release binary
 

@@ -22,6 +22,8 @@ import (
 )
 
 // Version is stamped at build time with -ldflags "-X ...cli.Version=v0.1.0".
+// When it is not, the module version from the build info is used instead;
+// see resolveVersion.
 var Version = "dev"
 
 // Env holds the process environment a command runs in, so tests can drive the
@@ -59,6 +61,7 @@ Flags:
   --dry-run           Never change anything; report what would have happened.
   --json              Emit JSON instead of text.
   -v, --verbose       Include per service reasoning in text output.
+  --version           Print the version, the same as the version command.
 
 --dry-run, --json and --verbose are also accepted after the command name.
 Run "gpu-bouncer <command> --help" for command specific flags.
@@ -96,6 +99,7 @@ func Main(args []string, env Env) int {
 	fs.BoolVar(&g.asJSON, "json", false, "emit JSON")
 	fs.BoolVar(&g.verbose, "verbose", false, "include per service reasoning")
 	fs.BoolVar(&g.verbose, "v", false, "include per service reasoning")
+	showVersion := fs.Bool("version", false, "print the version")
 
 	if err := fs.Parse(args); err != nil {
 		// Asking for help is not a usage error. The release workflow runs
@@ -112,6 +116,12 @@ func Main(args []string, env Env) int {
 	// the command name onward belongs to the subcommand, which does its own
 	// order independent parsing.
 	rest := fs.Args()
+	if *showVersion {
+		if err := runVersion(nil, g, env); err != nil {
+			return fail(env, g, err)
+		}
+		return 0
+	}
 	if len(rest) == 0 {
 		fmt.Fprint(env.Stderr, usage)
 		return 2
