@@ -290,11 +290,22 @@ func elide(name string) string {
 // policy.min_effect_mib of free VRAM, or failed, and ends any cooldown for a
 // service whose action worked. It is the only place cooldowns begin.
 func (d *Daemon) recordEffect(r ipc.ActionResult) {
-	gain := int64(r.FreeAfterMiB) - int64(r.FreeBeforeMiB)
+	measured := r.FreeBeforeMiB != nil && r.FreeAfterMiB != nil
+	var gain int64
+	if measured {
+		gain = int64(*r.FreeAfterMiB) - int64(*r.FreeBeforeMiB)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if r.Error == "" && gain >= int64(d.cfg.Policy.MinEffectMiB) {
+	if r.Error == "" && measured && gain >= int64(d.cfg.Policy.MinEffectMiB) {
 		delete(d.cooldowns, r.Service)
+		return
+	}
+	if r.Error == "" && !measured {
+		// The action did not fail and its effect could not be measured, so
+		// there is no evidence it was useless. Starting a cooldown here
+		// would leave a service alone for a whole window on the strength
+		// of a reading that never happened.
 		return
 	}
 	reason := fmt.Sprintf("%s freed %d MiB, below min_effect_mib %d", r.Verb, gain, d.cfg.Policy.MinEffectMiB)
@@ -430,8 +441,7 @@ func (d *Daemon) executeOne(ctx context.Context, action scheduler.Action) ipc.Ac
 		Verb:    string(action.Verb),
 		Reason:  action.Reason,
 	}
-	before, _ := d.observer.Device(ctx)
-	result.FreeBeforeMiB = before.FreeMiB()
+	result.FreeBeforeMiB = d.readFree(ctx, action.Service, "before")
 
 	svc, configured := d.cfg.Service(action.Service)
 	if !configured {
@@ -483,11 +493,25 @@ func (d *Daemon) executeOne(ctx context.Context, action scheduler.Action) ipc.Ac
 		result.Error = err.Error()
 	}
 
-	after, _ := d.observer.Device(ctx)
-	result.FreeAfterMiB = after.FreeMiB()
+	result.FreeAfterMiB = d.readFree(ctx, action.Service, "after")
 	d.logAction(result)
 	d.recordEffect(result)
 	return result
+}
+
+// readFree reads the GPU's free VRAM either side of an action. A failure is
+// reported as no figure and logged, never as zero: zero is what a full card
+// reads, and the difference between two of them told the cooldown that the
+// action had lost the whole card.
+func (d *Daemon) readFree(ctx context.Context, service, when string) *uint64 {
+	dev, err := d.observer.Device(ctx)
+	if err != nil {
+		d.log.Warn("the GPU could not be read "+when+" the action, so its effect is unknown",
+			"service", service, "error", err)
+		return nil
+	}
+	free := dev.FreeMiB()
+	return &free
 }
 
 // logAction emits the one line that matters for auditing what gpu-bouncer did.
@@ -496,8 +520,8 @@ func (d *Daemon) logAction(r ipc.ActionResult) {
 		"service", r.Service,
 		"verb", r.Verb,
 		"acted", r.Acted,
-		"free_before_mib", r.FreeBeforeMiB,
-		"free_after_mib", r.FreeAfterMiB,
+		"free_before_mib", mibOrUnknown(r.FreeBeforeMiB),
+		"free_after_mib", mibOrUnknown(r.FreeAfterMiB),
 	}
 	if r.Detail != "" {
 		attrs = append(attrs, "detail", r.Detail)
@@ -508,6 +532,16 @@ func (d *Daemon) logAction(r ipc.ActionResult) {
 		return
 	}
 	d.log.Info("action", attrs...)
+}
+
+// mibOrUnknown keeps a reading that failed out of the log as a number. A
+// zero there reads as a measurement, and the whole point of logging these two
+// figures is that they were measured.
+func mibOrUnknown(v *uint64) any {
+	if v == nil {
+		return "unknown"
+	}
+	return *v
 }
 
 // handle answers one control socket request. send delivers a preliminary
@@ -659,8 +693,8 @@ func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request, send func(i
 	free := plan.CurrentFreeMiB
 	if resp.FreeAfterMiB != nil {
 		free = *resp.FreeAfterMiB
-	} else if n := len(resp.Executed); n > 0 {
-		free = resp.Executed[n-1].FreeAfterMiB
+	} else if n := len(resp.Executed); n > 0 && resp.Executed[n-1].FreeAfterMiB != nil {
+		free = *resp.Executed[n-1].FreeAfterMiB
 	}
 	met := free >= plan.TargetFreeMiB
 	resp.TargetMet = &met

@@ -500,6 +500,14 @@ func callDaemon(ctx context.Context, g *globals, env Env, req ipc.Request) error
 	return nil
 }
 
+// mibOrUnknown renders a VRAM figure the daemon could not read as what it is.
+func mibOrUnknown(v *uint64) string {
+	if v == nil {
+		return "unknown"
+	}
+	return mib(*v)
+}
+
 // shortfallLine says how much of the room a request asked for was actually
 // freed, whether or not the target was reached, so the answer to "did I get
 // it" is on the last line and not only in --json.
@@ -514,14 +522,28 @@ func shortfallLine(resp ipc.Response) string {
 	// have all finished measures the plan as a whole. A daemon that sent
 	// none leaves the last action's own figure, which is what an older one
 	// reports.
+	measured := false
 	if n := len(resp.Executed); n > 0 {
 		first, last := resp.Executed[0].FreeBeforeMiB, resp.Executed[n-1].FreeAfterMiB
 		if resp.FreeAfterMiB != nil {
-			last = *resp.FreeAfterMiB
+			last = resp.FreeAfterMiB
 		}
-		if last > first {
-			freed = last - first
+		if first != nil && last != nil {
+			measured = true
+			if *last > *first {
+				freed = *last - *first
+			}
 		}
+	}
+	if !measured {
+		// The GPU could not be read either side of the plan. How much was
+		// freed is not known, and a confident "freed 0 MiB" would be a
+		// measurement nobody took.
+		line := fmt.Sprintf("how much of the %s asked for was freed is not known: the GPU could not be read", mib(asked))
+		if resp.TargetMet != nil && !*resp.TargetMet {
+			line += ", target not met"
+		}
+		return line
 	}
 	line := fmt.Sprintf("freed %s of the %s asked for", mib(freed), mib(asked))
 	if resp.TargetMet != nil && !*resp.TargetMet {
@@ -743,9 +765,16 @@ func printOutcome(env Env, resp ipc.Response, verbose bool) {
 		if r.Error != "" {
 			outcome = "failed"
 		}
-		freed := int64(r.FreeAfterMiB) - int64(r.FreeBeforeMiB)
-		fmt.Fprintf(out, "  %s %s: %s, free VRAM %s to %s (%+d MiB)\n",
-			r.Verb, r.Service, outcome, mib(r.FreeBeforeMiB), mib(r.FreeAfterMiB), freed)
+		if r.FreeBeforeMiB != nil && r.FreeAfterMiB != nil {
+			freed := int64(*r.FreeAfterMiB) - int64(*r.FreeBeforeMiB)
+			fmt.Fprintf(out, "  %s %s: %s, free VRAM %s to %s (%+d MiB)\n",
+				r.Verb, r.Service, outcome, mib(*r.FreeBeforeMiB), mib(*r.FreeAfterMiB), freed)
+		} else {
+			// A reading that failed is said to have failed. Printing it as
+			// 0 MiB would be a figure nobody measured.
+			fmt.Fprintf(out, "  %s %s: %s, free VRAM %s to %s\n",
+				r.Verb, r.Service, outcome, mibOrUnknown(r.FreeBeforeMiB), mibOrUnknown(r.FreeAfterMiB))
+		}
 		if r.Detail != "" {
 			fmt.Fprintf(out, "    %s\n", r.Detail)
 		}

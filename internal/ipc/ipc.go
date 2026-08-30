@@ -71,14 +71,18 @@ type Request struct {
 // from the service, because a service reporting that it unloaded something is
 // not evidence that the memory came back.
 type ActionResult struct {
-	Service       string `json:"service"`
-	Verb          string `json:"verb"`
-	Reason        string `json:"reason,omitempty"`
-	Acted         bool   `json:"acted"`
-	Detail        string `json:"detail,omitempty"`
-	Error         string `json:"error,omitempty"`
-	FreeBeforeMiB uint64 `json:"free_before_mib"`
-	FreeAfterMiB  uint64 `json:"free_after_mib"`
+	Service string `json:"service"`
+	Verb    string `json:"verb"`
+	Reason  string `json:"reason,omitempty"`
+	Acted   bool   `json:"acted"`
+	Detail  string `json:"detail,omitempty"`
+	Error   string `json:"error,omitempty"`
+	// FreeBeforeMiB and FreeAfterMiB are null when that reading of the GPU
+	// failed. A failed reading reported as zero is a measurement nobody
+	// took: it read as a card with nothing free, and the difference between
+	// two of them read as the action having lost the whole card.
+	FreeBeforeMiB *uint64 `json:"free_before_mib"`
+	FreeAfterMiB  *uint64 `json:"free_after_mib"`
 }
 
 // GPUReport is the arbitrated device as the daemon last read it.

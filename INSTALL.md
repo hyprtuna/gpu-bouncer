@@ -299,8 +299,14 @@ gpu-bouncer daemon --log-level debug
 with the VRAM reading and, per service, whether it is up, what it holds,
 whether it is idle, its probe error, its cooldown and its claim, and one
 line per HTTP request an adapter makes, with the method, the URL, the status
-and the duration. Request headers are never logged, so a llama-swap API key
-never appears.
+and the duration, which is measured to the microsecond so that a call to a
+service on the same machine is not reported as taking no time at all. Request
+headers are never logged, so a llama-swap API key never appears.
+
+The action line the daemon writes for every action it takes carries the GPU's
+own free VRAM either side of it. Either figure reads `unknown` when that
+reading of the GPU failed, rather than `0`, which is what a full card reads
+and what the difference between two of them used to blame on the action.
 
 ## Verify it works
 
@@ -407,7 +413,8 @@ strings).
 `N of M actions failed`), `message` (a dry run, a dry-run daemon, or a second
 `request` for a service that already holds a claim, which reads `updated the
 claim held since <time>`), `plan` as above, `executed` (list of `service`, `verb`, `reason`, `acted`,
-`detail`, `error`, `free_before_mib`, `free_after_mib`), `free_after_mib`
+`detail`, `error`, `free_before_mib`, `free_after_mib`, the last two null
+when that reading of the GPU failed), `free_after_mib`
 (the GPU's free VRAM read once after every action had finished, or `null`
 when nothing ran or the reading failed), and on `request` only `target_met`
 (bool: that reading is at or above the target).
