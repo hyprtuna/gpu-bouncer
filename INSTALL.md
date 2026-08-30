@@ -416,8 +416,9 @@ strings).
 claim held since <time>`), `plan` as above, `executed` (list of `service`, `verb`, `reason`, `acted`,
 `detail`, `error`, `free_before_mib`, `free_after_mib`, the last two null
 when that reading of the GPU failed), `free_after_mib`
-(the GPU's free VRAM read once after every action had finished, or `null`
-when nothing ran or the reading failed), and on `request` only `target_met`
+(the GPU's free VRAM read once after every action had finished, or the
+reading the plan itself was built on when it had nothing to run, and `null`
+when a reading failed), and on `request` only `target_met`
 (bool: that reading is at or above the target).
 
 A plan's actions run concurrently, one at a time per service, so a plan takes
