@@ -35,6 +35,9 @@ func serveDaemonReporting(t *testing.T, report ipc.ConfigReport) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// One finished line, written and never appended to: two connections
+	// appending to the same slice would share its backing array.
+	line := append(body, '\n')
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -46,7 +49,7 @@ func serveDaemonReporting(t *testing.T, report ipc.ConfigReport) {
 				if _, err := bufio.NewReader(conn).ReadBytes('\n'); err != nil {
 					return
 				}
-				_, _ = conn.Write(append(body, '\n'))
+				_, _ = conn.Write(line)
 			}()
 		}
 	}()
