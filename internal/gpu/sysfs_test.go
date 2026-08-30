@@ -472,3 +472,211 @@ func TestSortProcesses(t *testing.T) {
 		}
 	}
 }
+
+// danglingCard writes a card whose device symlink points at a path that does
+// not exist. fakeCard cannot build one, because it creates the target first,
+// which is exactly why this case went untested.
+func danglingCard(t *testing.T, root, card string) {
+	t.Helper()
+	cardDir := filepath.Join(root, card)
+	if err := os.MkdirAll(cardDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "devices", "gone-"+card)
+	if err := os.Symlink(target, filepath.Join(cardDir, "device")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A dangling device symlink is not a virtual card. Something is behind that
+// card that this process cannot reach, so dropping it would renumber every
+// card after it, which is the hazard the whole numbering rule exists for.
+func TestSysfsDanglingDeviceLinkKeepsItsIndex(t *testing.T) {
+	root := t.TempDir()
+	amdCard(t, root, "card0", "0000:01:00.0", "2147483648\n", "0\n")
+	danglingCard(t, root, "card1")
+	amdCard(t, root, "card2", "0000:05:00.0", "4294967296\n", "0\n")
+
+	devices := openFake(t, root)
+	if len(devices) != 3 {
+		t.Fatalf("got %d devices, want 3: %+v", len(devices), devices)
+	}
+	if devices[1].Unreadable == "" {
+		t.Errorf("the dangling card reads as readable: %+v", devices[1])
+	}
+	if !strings.Contains(devices[1].Unreadable, "device directory cannot be read") {
+		t.Errorf("card1 Unreadable = %q, want it to say the device directory could not be read", devices[1].Unreadable)
+	}
+	// The card after it keeps the number the kernel gave it.
+	if devices[2].Index != 2 || devices[2].BusID != "0000:05:00.0" || devices[2].TotalMiB != 4096 {
+		t.Errorf("card2 = %+v, want index 2, bus 0000:05:00.0, 4096 MiB", devices[2])
+	}
+	if devices[0].Unreadable != "" || devices[0].TotalMiB != 2048 {
+		t.Errorf("card0 = %+v, want readable at index 0", devices[0])
+	}
+}
+
+// A device entry that is not a directory is in the same position: it might be
+// anything, so the card stays.
+func TestSysfsDeviceEntryThatIsNotADirectoryKeepsItsIndex(t *testing.T) {
+	root := t.TempDir()
+	cardDir := filepath.Join(root, "card0")
+	if err := os.MkdirAll(cardDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cardDir, "device"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	amdCard(t, root, "card1", "0000:05:00.0", "2147483648\n", "0\n")
+
+	devices := openFake(t, root)
+	if len(devices) != 2 {
+		t.Fatalf("got %d devices, want 2: %+v", len(devices), devices)
+	}
+	if !strings.Contains(devices[0].Unreadable, "is not a directory") {
+		t.Errorf("card0 Unreadable = %q, want it to say the device entry is not a directory", devices[0].Unreadable)
+	}
+	if devices[1].Index != 1 || devices[1].TotalMiB != 2048 {
+		t.Errorf("card1 = %+v, want readable at index 1", devices[1])
+	}
+}
+
+// The one case where leaving a card out is right: the device directory can be
+// read and simply has no PCI vendor in it, which is a virtual card.
+func TestSysfsVirtualCardWithAReadableDeviceDirIsStillSkipped(t *testing.T) {
+	root := t.TempDir()
+	// A platform device with no vendor file, the shape simpledrm and vkms
+	// have, reachable through the link.
+	cardDir := filepath.Join(root, "card0")
+	platform := filepath.Join(root, "devices", "simple-framebuffer.0")
+	for _, dir := range []string{cardDir, platform} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(platform, filepath.Join(cardDir, "device")); err != nil {
+		t.Fatal(err)
+	}
+	amdCard(t, root, "card1", "0000:05:00.0", "2147483648\n", "0\n")
+
+	devices := openFake(t, root)
+	if len(devices) != 1 {
+		t.Fatalf("got %d devices, want only the real one: %+v", len(devices), devices)
+	}
+	if devices[0].BusID != "0000:05:00.0" || devices[0].Index != 0 {
+		t.Errorf("devices[0] = %+v, want the AMD card at index 0", devices[0])
+	}
+}
+
+// A vendor file that cannot be read leaves the card in place, and the card
+// after it keeps its number. The one card version of this could not show the
+// second half.
+func TestSysfsUnreadableVendorFileDoesNotRenumberTheNextCard(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not apply to root")
+	}
+	root := t.TempDir()
+	amdCard(t, root, "card0", "0000:03:00.0", "8589934592\n", "0\n")
+	amdCard(t, root, "card1", "0000:05:00.0", "2147483648\n", "1048576\n")
+	vendor := filepath.Join(root, "devices", "0000:03:00.0", "vendor")
+	if err := os.Chmod(vendor, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(vendor, 0o644) })
+
+	devices := openFake(t, root)
+	assertNumbering(t, devices, "0000:03:00.0", "0000:05:00.0")
+	if !strings.Contains(devices[0].Unreadable, "vendor file cannot be read") {
+		t.Errorf("card0 Unreadable = %q, want the vendor file named", devices[0].Unreadable)
+	}
+	if devices[1].Unreadable != "" || devices[1].TotalMiB != 2048 || devices[1].UsedMiB != 1 {
+		t.Errorf("card1 = %+v, want readable at index 1 with 2048 MiB total", devices[1])
+	}
+}
+
+// A vendor entry that is a directory reads as a directory, not as an absent
+// vendor, so the card stays.
+func TestSysfsVendorThatIsADirectoryKeepsItsIndex(t *testing.T) {
+	root := t.TempDir()
+	cardDir := filepath.Join(root, "card0")
+	pciDir := filepath.Join(root, "devices", "0000:03:00.0")
+	if err := os.MkdirAll(filepath.Join(pciDir, "vendor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cardDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(pciDir, filepath.Join(cardDir, "device")); err != nil {
+		t.Fatal(err)
+	}
+	amdCard(t, root, "card1", "0000:05:00.0", "2147483648\n", "0\n")
+
+	devices := openFake(t, root)
+	assertNumbering(t, devices, "0000:03:00.0", "0000:05:00.0")
+	if !strings.Contains(devices[0].Unreadable, "vendor file cannot be read") {
+		t.Errorf("card0 Unreadable = %q, want the vendor file named", devices[0].Unreadable)
+	}
+}
+
+// The counters are read as uint64. The largest one there is must load, and
+// anything wider must be an unreadable card rather than a wrapped figure.
+func TestSysfsVRAMCounterAtTheEdgeOfUint64(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		total    string
+		wantMiB  uint64
+		wantFail string
+	}{
+		{"the largest uint64", "18446744073709551615\n", 18446744073709551615 / BytesPerMiB, ""},
+		{"one past uint64", "18446744073709551616\n", 0, "value out of range"},
+		{"far past uint64", "184467440737095516160000\n", 0, "value out of range"},
+		{"negative", "-1\n", 0, "is not a byte count"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			amdCard(t, root, "card0", "0000:03:00.0", tt.total, "0\n")
+			amdCard(t, root, "card1", "0000:05:00.0", "2147483648\n", "0\n")
+
+			devices := openFake(t, root)
+			assertNumbering(t, devices, "0000:03:00.0", "0000:05:00.0")
+			if tt.wantFail == "" {
+				if devices[0].Unreadable != "" {
+					t.Fatalf("card0 Unreadable = %q, want it readable", devices[0].Unreadable)
+				}
+				if devices[0].TotalMiB != tt.wantMiB {
+					t.Errorf("TotalMiB = %d, want %d", devices[0].TotalMiB, tt.wantMiB)
+				}
+				// Used is 0, so free is the whole card and nothing wrapped.
+				if devices[0].FreeMiB() != tt.wantMiB {
+					t.Errorf("FreeMiB = %d, want %d", devices[0].FreeMiB(), tt.wantMiB)
+				}
+				return
+			}
+			if !strings.Contains(devices[0].Unreadable, tt.wantFail) {
+				t.Errorf("card0 Unreadable = %q, want it to contain %q", devices[0].Unreadable, tt.wantFail)
+			}
+			if devices[0].TotalMiB != 0 {
+				t.Errorf("TotalMiB = %d on an unreadable card, want 0", devices[0].TotalMiB)
+			}
+			if devices[1].Unreadable != "" || devices[1].TotalMiB != 2048 {
+				t.Errorf("card1 = %+v, want readable at index 1", devices[1])
+			}
+		})
+	}
+}
+
+// Cards are numbered the way the kernel numbers them, so a multi digit card
+// between two single digit ones must not sort lexically.
+func TestSysfsMultiDigitCardBetweenSingleDigitOnes(t *testing.T) {
+	root := t.TempDir()
+	amdCard(t, root, "card10", "0000:0a:00.0", "1073741824\n", "0\n")
+	amdCard(t, root, "card2", "0000:05:00.0", "2147483648\n", "0\n")
+	amdCard(t, root, "card0", "0000:01:00.0", "4294967296\n", "0\n")
+
+	devices := openFake(t, root)
+	assertNumbering(t, devices, "0000:01:00.0", "0000:05:00.0", "0000:0a:00.0")
+	if devices[0].TotalMiB != 4096 || devices[1].TotalMiB != 2048 || devices[2].TotalMiB != 1024 {
+		t.Errorf("totals = %d, %d, %d, want card0, card2, card10 in that order",
+			devices[0].TotalMiB, devices[1].TotalMiB, devices[2].TotalMiB)
+	}
+}

@@ -80,3 +80,34 @@ func TestDeviceNoSource(t *testing.T) {
 		t.Error("Device with no source returned no error")
 	}
 }
+
+// The reason has to come first. On an NVIDIA card whose NVML could not be
+// opened, NVML's own error is the one line that says what to fix, and sixty
+// characters of device identification in front of it buried it.
+func TestDeviceErrorLeadsWithTheReason(t *testing.T) {
+	const reason = "nvml: init: ERROR_LIBRARY_NOT_FOUND; sysfs exposes no VRAM counters for an NVIDIA card, " +
+		"and NVML, which this build has, could not be opened: check that libnvidia-ml.so.1 from the NVIDIA " +
+		"driver is installed and loadable by this process, see INSTALL.md"
+	dev := gpu.Device{Index: 0, Name: "NVIDIA device 0x2820", BusID: "0000:01:00.0", Vendor: "0x10de", Unreadable: reason}
+
+	_, err := observer(t, 0, dev).Device(context.Background())
+	if err == nil {
+		t.Fatal("an unreadable device was returned without an error")
+	}
+	if !strings.HasPrefix(err.Error(), "nvml: init: ERROR_LIBRARY_NOT_FOUND;") {
+		t.Errorf("error = %q, want it to begin with the NVML failure", err)
+	}
+	// The identification is still there, behind the reason.
+	for _, want := range []string{"GPU 0", "NVIDIA device 0x2820", "PCI 0000:01:00.0", "fake source"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to still contain %q", err, want)
+		}
+	}
+
+	// Observe carries the same text, which is what the plan note and the
+	// daemon's refusal to start are built from.
+	obs := observer(t, 0, dev).Observe(context.Background())
+	if obs.DeviceErr != err.Error() {
+		t.Errorf("DeviceErr = %q, want the same text as Device's error %q", obs.DeviceErr, err)
+	}
+}

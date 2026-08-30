@@ -513,18 +513,24 @@ cause it, and the reason line on an NVIDIA card says which:
   `nvml: init: ERROR_LIBRARY_NOT_FOUND;`, followed by
   `NVML, which this build has, could not be opened`. Install the NVIDIA
   driver, or check that the daemon's process can load the library and see
-  the device nodes.
+  the device nodes. All four surfaces that carry this reason lead with it,
+  `status`, `status --json`'s `devices[].error`, `plan`'s note and the
+  daemon's refusal to start; the device it applies to follows in brackets.
 - There is no NVIDIA GPU. On an AMD card sysfs is the only source there is,
   and it is working as intended.
 
 A card whose sysfs entries cannot be read, for example a `device` directory
-the daemon's user may not traverse, or a counter file that does not parse, is
-still listed at its index as unreadable with the error, so no other card is
+the daemon's user may not traverse, a `device` symlink that points nowhere, a
+`device` entry that is not a directory, or a counter file that does not parse,
+is still listed at its index as unreadable with the error, so no other card is
 renumbered and no other card is hidden by it.
 
 The sysfs source lists every DRM card that sits on a PCI device, in kernel
 order, and numbers them in that order. Virtual cards such as simpledrm are
-skipped. VRAM counters in sysfs exist only for the amdgpu driver, so an NVIDIA
+skipped, and only they are: a card counts as virtual when its `device`
+directory can be read and simply holds no PCI `vendor`. A `device` entry that
+cannot be reached at all says nothing about what is behind it, so that card is
+kept. VRAM counters in sysfs exist only for the amdgpu driver, so an NVIDIA
 card is listed with its PCI address and vendor but marked unreadable, and it
 keeps its index. That matters on a laptop with an NVIDIA card and an AMD
 integrated GPU, which is the output above: the NVIDIA card is GPU 0, the
