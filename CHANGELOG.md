@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A GPU reading that failed was reported as zero.** The read taken either
+  side of an action discarded its error, so a failure logged
+  `free_after_mib=0`, a figure nobody measured, and fed the difference from
+  the real reading before it, minus the whole card, into the cooldown that
+  decides whether an action was worth taking. Both figures are now null in
+  `--json`, `unknown` in the log, and the failure itself is logged. An action
+  whose effect could not be measured no longer starts a cooldown, because an
+  unmeasurable action is not a useless one.
+- **Every request to a local service logged `duration=0s`.** The figure was
+  rounded to the millisecond, and a call to a service on the same machine
+  takes less than that. It is measured to the microsecond now.
 - **A systemd `unit` was never validated.** toml 1.6.0 also decodes `\e`, so a
   config file could put an escape character into a unit name, where it reached
   a `systemctl` argument and every error message about the service invisibly. A

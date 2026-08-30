@@ -1,14 +1,18 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // A redirect must never be followed. The config names one host per service,
@@ -114,4 +118,60 @@ func TestErrorsRedactUserinfo(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "hunter2") {
 		t.Errorf("transport error = %v, want a failure without the password", err)
 	}
+}
+
+// A request to a service on the same machine takes well under a millisecond.
+// Rounded to the millisecond it logged duration=0s, which is exactly the
+// case the debug log is most often read for.
+func TestRequestDurationHasSubMillisecondPrecision(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	Logger = slog.New(slog.NewTextHandler(&syncWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { Logger = nil })
+
+	var body map[string]any
+	if err := doJSON(context.Background(), newHTTPClient(), http.MethodGet, srv.URL+"/api/version", nil, &body, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	logged := buf.String()
+	mu.Unlock()
+	if !strings.Contains(logged, "msg=\"http request\"") {
+		t.Fatalf("no request was logged:\n%s", logged)
+	}
+	if strings.Contains(logged, "duration=0s") {
+		t.Errorf("a local request logged duration=0s, want a measurable figure:\n%s", logged)
+	}
+	// The figure has to be a duration Go can read back, not a bare number.
+	for _, field := range strings.Fields(logged) {
+		value, ok := strings.CutPrefix(field, "duration=")
+		if !ok {
+			continue
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil {
+			t.Errorf("duration %q does not parse: %v", value, err)
+		}
+		if d <= 0 {
+			t.Errorf("duration = %s, want more than zero", d)
+		}
+	}
+}
+
+// syncWriter serialises writes from the client's goroutines.
+type syncWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }

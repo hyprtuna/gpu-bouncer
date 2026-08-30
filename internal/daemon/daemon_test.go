@@ -296,11 +296,11 @@ func TestDaemonRequestFreesLowerPriorityService(t *testing.T) {
 	if action.Error != "" {
 		t.Errorf("action error: %s", action.Error)
 	}
-	if got, want := action.FreeBeforeMiB, uint64(2992); got != want {
-		t.Errorf("FreeBeforeMiB = %d, want %d", got, want)
+	if action.FreeBeforeMiB == nil || *action.FreeBeforeMiB != 2992 {
+		t.Errorf("FreeBeforeMiB = %v, want 2992", action.FreeBeforeMiB)
 	}
-	if got, want := action.FreeAfterMiB, uint64(8112); got != want {
-		t.Errorf("FreeAfterMiB = %d, want %d", got, want)
+	if action.FreeAfterMiB == nil || *action.FreeAfterMiB != 8112 {
+		t.Errorf("FreeAfterMiB = %v, want 8112", action.FreeAfterMiB)
 	}
 	if fakeOllama.unloadHit.Load() != 1 {
 		t.Errorf("ollama received %d unload calls, want 1", fakeOllama.unloadHit.Load())
@@ -1447,5 +1447,98 @@ func TestConnBudgetFollowsTheLongestAction(t *testing.T) {
 				t.Errorf("connBudget() = %s, want more than the old flat two minutes", d.connBudget())
 			}
 		})
+	}
+}
+
+// A GPU read that failed is not a measurement of zero. Reported as zero it
+// read as a card with nothing free, and the difference between two of them
+// told the cooldown that the release had lost the whole card.
+func TestAFailedGPUReadIsUnknownAndNotZero(t *testing.T) {
+	fake := &fakeOllamaServer{}
+	fake.loaded.Store(true)
+	hardware := &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 5200}}
+	cfg := config.Config{
+		Policy: config.Policy{VRAMFloorMiB: 512, PollInterval: config.Duration(time.Hour), MinEffectMiB: 64},
+		Services: []config.Service{
+			{Name: "keeper", Adapter: config.AdapterOllama, Endpoint: (&fakeOllamaServer{}).start(t), Priority: 90},
+			{Name: "oll", Adapter: config.AdapterOllama, Endpoint: fake.start(t), Priority: 10},
+		},
+	}
+	// The GPU stops answering the moment the release is accepted, which is
+	// what a driver reset in the middle of an action looks like.
+	fake.onUnload = func() { hardware.setFail(true) }
+
+	var log bytes.Buffer
+	var mu sync.Mutex
+	d := newTestDaemon(t, cfg, hardware, false)
+	d.log = slog.New(slog.NewTextHandler(&lockedWriter{w: &log, mu: &mu}, nil))
+	startDaemon(t, d)
+
+	resp := call(t, ipc.Request{Op: ipc.OpEvict, Service: "oll"})
+	if len(resp.Executed) != 1 {
+		t.Fatalf("executed = %+v, want one action", resp.Executed)
+	}
+	r := resp.Executed[0]
+	if r.FreeBeforeMiB == nil || *r.FreeBeforeMiB != 2992 {
+		t.Errorf("free_before_mib = %v, want the reading taken before the action", r.FreeBeforeMiB)
+	}
+	if r.FreeAfterMiB != nil {
+		t.Errorf("free_after_mib = %d, want null: the GPU could not be read", *r.FreeAfterMiB)
+	}
+	if resp.FreeAfterMiB != nil {
+		t.Errorf("the plan's own free_after_mib = %d, want null", *resp.FreeAfterMiB)
+	}
+
+	mu.Lock()
+	logged := log.String()
+	mu.Unlock()
+	if !strings.Contains(logged, "the GPU could not be read after the action") {
+		t.Errorf("the failed reading was not logged:\n%s", logged)
+	}
+	if !strings.Contains(logged, "free_after_mib=unknown") {
+		t.Errorf("the action log reports a figure for a reading that failed:\n%s", logged)
+	}
+	if strings.Contains(logged, "free_after_mib=0") {
+		t.Errorf("a failed reading was logged as 0:\n%s", logged)
+	}
+
+	// A gain that could not be measured is not evidence of a useless action,
+	// so it must not start a cooldown of its own.
+	status := call(t, ipc.Request{Op: ipc.OpStatus})
+	for _, c := range status.Cooldowns {
+		if c.Service == "oll" && !strings.Contains(c.Reason, "failed") {
+			t.Errorf("an unmeasurable action started a cooldown: %+v", c)
+		}
+	}
+}
+
+// The ordinary path still measures and still reports both figures.
+func TestAMeasuredActionReportsBothFigures(t *testing.T) {
+	fake := &fakeOllamaServer{}
+	fake.loaded.Store(true)
+	hardware := &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 5200}}
+	fake.onUnload = func() { hardware.setUsed(80) }
+	cfg := config.Config{
+		Policy: config.Policy{VRAMFloorMiB: 512, PollInterval: config.Duration(time.Hour), MinEffectMiB: 64},
+		Services: []config.Service{
+			{Name: "keeper", Adapter: config.AdapterOllama, Endpoint: (&fakeOllamaServer{}).start(t), Priority: 90},
+			{Name: "oll", Adapter: config.AdapterOllama, Endpoint: fake.start(t), Priority: 10},
+		},
+	}
+	testDaemon(t, cfg, hardware, false)
+
+	resp := call(t, ipc.Request{Op: ipc.OpEvict, Service: "oll"})
+	if len(resp.Executed) != 1 {
+		t.Fatalf("executed = %+v, want one action", resp.Executed)
+	}
+	r := resp.Executed[0]
+	if r.FreeBeforeMiB == nil || r.FreeAfterMiB == nil {
+		t.Fatalf("figures = %v, %v; want both measured", r.FreeBeforeMiB, r.FreeAfterMiB)
+	}
+	if *r.FreeAfterMiB <= *r.FreeBeforeMiB {
+		t.Errorf("free went from %d to %d, want the release to have freed VRAM", *r.FreeBeforeMiB, *r.FreeAfterMiB)
+	}
+	if resp.FreeAfterMiB == nil || *resp.FreeAfterMiB != *r.FreeAfterMiB {
+		t.Errorf("the plan's free_after_mib = %v, want the reading after the action", resp.FreeAfterMiB)
 	}
 }

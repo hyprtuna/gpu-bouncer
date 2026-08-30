@@ -25,7 +25,11 @@ func logRequest(method, redactedURL string, status int, start time.Time, err err
 	if Logger == nil {
 		return
 	}
-	attrs := []any{"method", method, "url", redactedURL, "duration", time.Since(start).Round(time.Millisecond).String()}
+	// Rounded to the millisecond, every call to a service on the same
+	// machine logged duration=0s, which is the case the log is most often
+	// read for. A microsecond is fine enough to tell a local call from one
+	// that went over a network and coarse enough to stay readable.
+	attrs := []any{"method", method, "url", redactedURL, "duration", time.Since(start).Round(time.Microsecond).String()}
 	if err != nil {
 		attrs = append(attrs, "error", err.Error())
 	} else {
