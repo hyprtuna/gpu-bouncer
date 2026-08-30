@@ -393,7 +393,7 @@ the key.
 | `claims` | list | outstanding claims: `service`, `need_mib`, `at`; empty without a daemon |
 | `cooldowns` | list | services the daemon's loop is leaving alone: `service`, `until`, `reason`; empty without a daemon |
 | `daemon_running` | bool | whether a daemon answered |
-| `daemon_dry_run` | bool | whether that daemon plans and never acts |
+| `daemon_dry_run` | bool or null | whether that daemon plans and never acts; null when no daemon answered, or when the one that did is older than this client and does not report it |
 | `daemon_config` | object or null | what the daemon loaded: `path` (joined), `paths` (the list), `sha256` (over their contents), `loaded_at`; null without a daemon |
 | `config_stale` | bool or null | true when the files the daemon loaded have changed since it loaded them; null when that is not known |
 | `config` | string or null | the file(s) this command read; null when none was found |
