@@ -250,7 +250,7 @@ func (a *comfyUIAdapter) Release(ctx context.Context) (Result, error) {
 	}
 
 	// Targets is left empty on purpose. ComfyUI unloads everything on every
-	// visible torch device (unload_all_models, model_management.py:2068) and
+	// visible torch device (unload_all_models, model_management.py:2063) and
 	// names none of it, so there is nothing truthful to list.
 	return Result{
 		Acted:  true,

@@ -29,6 +29,10 @@ The `/cmd/gpu-bouncer` suffix is required: the module root holds no main
 package. The binary lands in `$(go env GOPATH)/bin`, which is `~/go/bin`
 unless you have changed it. Put that directory on your `PATH`.
 
+A cgo build prints a page of `warning: 'nvmlDevice...' is deprecated
+[-Wdeprecated-declarations]` lines: they come from the NVML headers bundled
+with go-nvml, are harmless, and the build has not failed.
+
 A binary installed this way reports the module version Go recorded in it:
 
 ```
@@ -78,6 +82,10 @@ install -Dm755 gpu-bouncer ~/.local/bin/gpu-bouncer
 
 Use `sudo install -Dm755 gpu-bouncer /usr/local/bin/gpu-bouncer` instead if
 you are going to run the system unit, whose `ExecStart` points there.
+
+The published binary is dynamically linked against glibc and needs glibc 2.34
+or newer (Ubuntu 22.04, Debian 12, Fedora 35, RHEL 9 or later); older systems
+build from source.
 
 ## Build from source
 
