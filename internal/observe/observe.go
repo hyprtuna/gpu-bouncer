@@ -8,6 +8,8 @@ package observe
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/hyprtuna/gpu-bouncer/internal/adapter"
@@ -47,20 +49,45 @@ func (o *Observer) Adapter(name string) (adapter.Adapter, bool) {
 // Config returns the configuration this Observer was built from.
 func (o *Observer) Config() config.Config { return o.cfg }
 
-// Device reads the arbitrated GPU. The boolean is false when VRAM could not be
-// read, which the scheduler treats as a reason to do nothing.
-func (o *Observer) Device(ctx context.Context) (gpu.Device, bool) {
+// Devices lists every GPU the source can see, readable or not.
+func (o *Observer) Devices(ctx context.Context) ([]gpu.Device, error) {
 	if o.source == nil {
-		return gpu.Device{}, false
+		return nil, errors.New("no GPU source could be opened")
 	}
-	devices, err := o.source.Devices(ctx)
-	if err != nil || len(devices) == 0 {
-		return gpu.Device{}, false
+	return o.source.Devices(ctx)
+}
+
+// Device reads the arbitrated GPU. A non nil error means VRAM could not be
+// read and says why, which the scheduler treats as a reason to do nothing.
+// When the device exists but is unreadable it is returned alongside the
+// error, so status can still identify it.
+func (o *Observer) Device(ctx context.Context) (gpu.Device, error) {
+	devices, err := o.Devices(ctx)
+	if err != nil {
+		return gpu.Device{}, err
 	}
-	if dev, ok := gpu.DeviceByIndex(devices, o.cfg.Policy.GPUIndex); ok {
-		return dev, true
+	if len(devices) == 0 {
+		return gpu.Device{}, gpu.ErrNoDevices
 	}
-	return gpu.Device{}, false
+	index := o.cfg.Policy.GPUIndex
+	dev, ok := gpu.DeviceByIndex(devices, index)
+	if !ok {
+		return gpu.Device{}, fmt.Errorf("policy.gpu_index %d names no device: the %s source sees %d device(s), indexes 0 to %d",
+			index, o.source.Name(), len(devices), len(devices)-1)
+	}
+	if dev.Unreadable != "" {
+		return dev, fmt.Errorf("GPU %d (%s) cannot be read by the %s source: %s", index, describe(dev), o.source.Name(), dev.Unreadable)
+	}
+	return dev, nil
+}
+
+// describe names a device the way a human would look it up.
+func describe(dev gpu.Device) string {
+	label := dev.Name
+	if dev.BusID != "" {
+		label += ", PCI " + dev.BusID
+	}
+	return label
 }
 
 // Observe probes every configured service concurrently and assembles the
@@ -71,7 +98,12 @@ func (o *Observer) Device(ctx context.Context) (gpu.Device, bool) {
 // Services are returned in config order, so downstream output is stable.
 func (o *Observer) Observe(ctx context.Context) scheduler.Observation {
 	obs := scheduler.Observation{}
-	obs.Device, obs.DeviceKnown = o.Device(ctx)
+	device, err := o.Device(ctx)
+	if err != nil {
+		obs.DeviceErr = err.Error()
+	} else {
+		obs.Device, obs.DeviceKnown = device, true
+	}
 
 	states := make([]scheduler.ServiceState, len(o.cfg.Services))
 	var wg sync.WaitGroup

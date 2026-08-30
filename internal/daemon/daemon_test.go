@@ -53,6 +53,12 @@ func (f *fakeGPU) setUsed(mib uint64) {
 	f.device.UsedMiB = mib
 }
 
+func (f *fakeGPU) setFail(fail bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail = fail
+}
+
 // fakeOllamaServer is enough of Ollama to drive one release.
 type fakeOllamaServer struct {
 	loaded    atomic.Bool
@@ -340,14 +346,17 @@ func TestDaemonClaimLifecycle(t *testing.T) {
 	}
 }
 
-// Without a GPU reading the daemon must refuse to act, whatever is asked.
+// Without a GPU reading the daemon must refuse to act, whatever is asked. The
+// source fails after startup here, as a driver reset would: a source that
+// fails at startup stops the daemon from starting at all, tested separately.
 func TestDaemonRefusesWithoutGPUState(t *testing.T) {
 	fakeOllama := &fakeOllamaServer{}
 	fakeOllama.loaded.Store(true)
 	url := fakeOllama.start(t)
-	hardware := &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 8000}, fail: true}
+	hardware := &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 8000}}
 
 	testDaemon(t, twoServiceConfig(url, true), hardware, false)
+	hardware.setFail(true)
 
 	resp := call(t, ipc.Request{Op: ipc.OpRequest, Service: "comfyui", NeedMiB: 6000})
 	if len(resp.Executed) != 0 {
@@ -359,6 +368,81 @@ func TestDaemonRefusesWithoutGPUState(t *testing.T) {
 	status := call(t, ipc.Request{Op: ipc.OpStatus})
 	if status.GPU == nil || status.GPU.Known {
 		t.Errorf("GPU = %+v, want it reported as unknown", status.GPU)
+	}
+	if status.GPU != nil && status.GPU.Error == "" {
+		t.Error("GPU reported unknown with no reason")
+	}
+}
+
+// runRefusal starts a daemon that is expected to refuse, and returns the error.
+func runRefusal(t *testing.T, cfg config.Config, source gpu.Source) error {
+	t.Helper()
+	if err := config.Validate(&cfg); err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	d, err := New(cfg, source, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return d.Run(ctx, filepath.Join(t.TempDir(), "gpu-bouncer.sock"))
+}
+
+// A hybrid laptop seen through sysfs: the NVIDIA card is index 0 and has no
+// VRAM counters there. The daemon must refuse to start rather than arbitrate
+// nothing, and must say what would fix it.
+func TestDaemonRefusesUnreadableArbitratedGPU(t *testing.T) {
+	root := t.TempDir()
+	writeFakeCard(t, root, "card1", "0000:01:00.0", "0x10de", "")
+	writeFakeCard(t, root, "card2", "0000:05:00.0", "0x1002", "2147483648")
+	source, err := gpu.OpenSysfs(root)
+	if err != nil {
+		t.Fatalf("OpenSysfs: %v", err)
+	}
+
+	url := (&fakeOllamaServer{}).start(t)
+	err = runRefusal(t, twoServiceConfig(url, false), source)
+	if err == nil {
+		t.Fatal("daemon started with an unreadable arbitrated GPU, want a refusal")
+	}
+	for _, want := range []string{"refusing to start", "GPU 0", "0000:01:00.0", "NVIDIA", "cgo"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+
+	// The AMD card at index 1 is readable, so the same tree with gpu_index = 1
+	// starts. Proves the refusal is about the index, not the source.
+	cfg := twoServiceConfig(url, false)
+	cfg.Policy.GPUIndex = 1
+	testDaemon(t, cfg, source, false)
+}
+
+// writeFakeCard lays out one DRM card the way the kernel does: a card
+// directory whose device link points at a PCI address. An empty total means
+// the driver exposes no VRAM counters.
+func writeFakeCard(t *testing.T, root, card, busID, vendor, totalBytes string) {
+	t.Helper()
+	pciDir := filepath.Join(root, "devices", busID)
+	if err := os.MkdirAll(pciDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, card), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(pciDir, filepath.Join(root, card, "device")); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{"vendor": vendor + "\n", "device": "0x1234\n"}
+	if totalBytes != "" {
+		files["mem_info_vram_total"] = totalBytes + "\n"
+		files["mem_info_vram_used"] = "0\n"
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(pciDir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

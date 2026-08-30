@@ -8,8 +8,9 @@
 //
 //	nvml   NVIDIA Management Library, the accurate one. Needs cgo and a
 //	       loadable libnvidia-ml.so, both resolved at run time.
-//	sysfs  read only amdgpu counters under /sys/class/drm. Reports memory
-//	       but not per process usage.
+//	sysfs  read only DRM attributes under /sys/class/drm. Every PCI card is
+//	       listed, but VRAM counters exist only for amdgpu, so an NVIDIA card
+//	       is present and unreadable there.
 package gpu
 
 import (
@@ -30,11 +31,20 @@ const BytesPerMiB = 1024 * 1024
 
 // Device is one GPU at one moment.
 type Device struct {
-	Index    int
-	UUID     string
-	Name     string
+	Index int
+	UUID  string
+	Name  string
+	// BusID is the PCI address, for example 0000:01:00.0, so that two sources
+	// that number cards differently can still be told to mean the same card.
+	BusID string
+	// Vendor is the PCI vendor id as sysfs spells it, for example 0x10de.
+	Vendor   string
 	TotalMiB uint64
 	UsedMiB  uint64
+	// Unreadable is non empty when the source can see the card but not its
+	// memory, and says why. TotalMiB and UsedMiB are then meaningless, and the
+	// scheduler must not act on the device.
+	Unreadable string
 }
 
 // FreeMiB is the memory not currently in use. It is derived rather than read,
@@ -44,6 +54,21 @@ func (d Device) FreeMiB() uint64 {
 		return 0
 	}
 	return d.TotalMiB - d.UsedMiB
+}
+
+// VendorName is the common name for a PCI vendor id, or empty for one this
+// package does not know.
+func (d Device) VendorName() string {
+	switch d.Vendor {
+	case "0x10de":
+		return "NVIDIA"
+	case "0x1002":
+		return "AMD"
+	case "0x8086":
+		return "Intel"
+	default:
+		return ""
+	}
 }
 
 // Process is one process holding GPU memory.
@@ -57,7 +82,8 @@ type Process struct {
 type Source interface {
 	// Name identifies the source in `status` output, for example "nvml".
 	Name() string
-	// Devices lists every GPU the source can see.
+	// Devices lists every GPU the source can see, including ones whose memory
+	// it cannot read; those carry a non empty Unreadable.
 	Devices(ctx context.Context) ([]Device, error)
 	// Processes lists processes holding memory on one device. It returns
 	// ErrUnsupported on sources that cannot see per process usage.
@@ -88,6 +114,12 @@ func Open() (Source, error) {
 	}
 
 	return nil, fmt.Errorf("no usable GPU source: %w", errors.Join(attempts...))
+}
+
+// OpenSysfs opens the sysfs source against a DRM class directory. It exists so
+// that other packages can test against a fake tree; Open uses the real one.
+func OpenSysfs(root string) (Source, error) {
+	return openSysfs(root)
 }
 
 // DeviceByIndex picks one device out of a list by its Index field, which is

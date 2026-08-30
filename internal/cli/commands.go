@@ -146,16 +146,30 @@ func runStatus(ctx context.Context, args []string, g globals, env Env) error {
 	if err != nil {
 		return err
 	}
-	device, deviceKnown := observer.Device(ctx)
-	statuses := observer.Statuses(ctx)
-
-	report := ipc.Response{
-		OK: true,
-		GPU: &ipc.GPUReport{
-			Known: deviceKnown, Index: device.Index, Name: device.Name, Source: sourceName,
-			TotalMiB: device.TotalMiB, UsedMiB: device.UsedMiB, FreeMiB: device.FreeMiB(),
-		},
+	report := ipc.Response{OK: true}
+	device, deviceErr := observer.Device(ctx)
+	gpuReport := ipc.GPUReportOf(device, sourceName)
+	if deviceErr != nil {
+		gpuReport.Known = false
+		switch {
+		case sourceErr != nil:
+			// The source's own failure is the more useful message, because
+			// it names every source that was tried.
+			gpuReport.Error = sourceErr.Error()
+		case device.Unreadable != "":
+			// The heading already names the device; the reason is enough.
+			gpuReport.Error = device.Unreadable
+		default:
+			gpuReport.Error = deviceErr.Error()
+		}
 	}
+	report.GPU = &gpuReport
+	if devices, err := observer.Devices(ctx); err == nil {
+		for _, d := range devices {
+			report.Devices = append(report.Devices, ipc.GPUReportOf(d, sourceName))
+		}
+	}
+	statuses := observer.Statuses(ctx)
 	for _, s := range statuses {
 		entry := ipc.ServiceReport{
 			Name: s.Service.Name, Adapter: string(s.Service.Adapter), Priority: s.Service.Priority,
@@ -192,7 +206,7 @@ func runStatus(ctx context.Context, args []string, g globals, env Env) error {
 	if g.asJSON {
 		return writeJSON(env, report)
 	}
-	printStatus(env, report, cfg.Sources, sourceErr, daemonUp)
+	printStatus(env, report, cfg.Sources, cfg.Policy.GPUIndex, daemonUp)
 	return nil
 }
 
@@ -343,21 +357,66 @@ func writeJSON(env Env, value any) error {
 // number whose unit the reader has to guess.
 func mib(v uint64) string { return fmt.Sprintf("%d MiB", v) }
 
-func printStatus(env Env, report ipc.Response, sources []string, sourceErr error, daemonUp bool) {
+// gpuHeading is the first line of a device: its index, name and PCI identity.
+func gpuHeading(g ipc.GPUReport) string {
+	heading := fmt.Sprintf("GPU %d  %s", g.Index, g.Name)
+	var id []string
+	if g.BusID != "" {
+		id = append(id, "PCI "+g.BusID)
+	}
+	if g.Vendor != "" {
+		id = append(id, "vendor "+g.Vendor)
+	}
+	if len(id) > 0 {
+		heading += "  (" + strings.Join(id, ", ") + ")"
+	}
+	return heading
+}
+
+func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, daemonUp bool) {
 	out := env.Stdout
 
-	if report.GPU != nil && report.GPU.Known {
+	switch {
+	case report.GPU != nil && report.GPU.Known:
 		g := report.GPU
-		fmt.Fprintf(out, "GPU %d  %s\n", g.Index, g.Name)
-		fmt.Fprintf(out, "  %s used of %s, %s free  (source: %s)\n\n",
+		fmt.Fprintln(out, gpuHeading(*g))
+		fmt.Fprintf(out, "  %s used of %s, %s free  (source: %s)\n",
 			mib(g.UsedMiB), mib(g.TotalMiB), mib(g.FreeMiB), g.Source)
-	} else {
-		fmt.Fprintf(out, "GPU  state unavailable\n")
-		if sourceErr != nil {
-			fmt.Fprintf(out, "  %v\n", sourceErr)
+	case report.GPU != nil && report.GPU.Name != "":
+		// The device exists but its memory cannot be read. Name it, so the
+		// user can see which card the index landed on.
+		g := report.GPU
+		fmt.Fprintln(out, gpuHeading(*g))
+		fmt.Fprintf(out, "  state unavailable  (source: %s)\n", g.Source)
+		fmt.Fprintf(out, "  %s\n", g.Error)
+	default:
+		fmt.Fprintln(out, "GPU  state unavailable")
+		if report.GPU != nil && report.GPU.Error != "" {
+			fmt.Fprintf(out, "  %s\n", report.GPU.Error)
 		}
-		fmt.Fprintln(out)
 	}
+	// Every other device the source sees, so a wrong gpu_index shows up as
+	// the card the user meant sitting one line below the one they got.
+	others := 0
+	for _, d := range report.Devices {
+		if d.Index != gpuIndex {
+			others++
+		}
+	}
+	if others > 0 {
+		fmt.Fprintf(out, "Other GPUs, not arbitrated (policy.gpu_index = %d):\n", gpuIndex)
+		for _, d := range report.Devices {
+			if d.Index == gpuIndex {
+				continue
+			}
+			if d.Known {
+				fmt.Fprintf(out, "  %s, %s used of %s\n", gpuHeading(d), mib(d.UsedMiB), mib(d.TotalMiB))
+			} else {
+				fmt.Fprintf(out, "  %s, unreadable\n", gpuHeading(d))
+			}
+		}
+	}
+	fmt.Fprintln(out)
 
 	if len(report.Services) == 0 {
 		fmt.Fprintln(out, "No services are configured, so gpu-bouncer will never act.")
