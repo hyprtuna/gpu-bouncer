@@ -512,3 +512,32 @@ func TestPlanJSONKeysAreSnakeCase(t *testing.T) {
 		}
 	}
 }
+
+// status ends with the daemon line and the config path even when no service
+// is configured, so an empty list can be traced to the file that produced it.
+func TestStatusTrailerWithoutServices(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "empty.toml")
+	if err := os.WriteFile(cfgPath, []byte("[policy]\nvram_floor_mib = 512\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvConfig, cfgPath)
+	t.Setenv(ipc.EnvSocket, filepath.Join(t.TempDir(), "none.sock"))
+
+	code, stdout, stderr := run("status")
+	if code != 0 {
+		t.Fatalf("exit code = %d: %s", code, stderr)
+	}
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("stdout too short:\n%s", stdout)
+	}
+	if got, want := lines[len(lines)-1], "Config: "+cfgPath; got != want {
+		t.Errorf("last line = %q, want %q", got, want)
+	}
+	if got, want := lines[len(lines)-2], "No daemon is running: gpu-bouncer is observing only, and will not act."; got != want {
+		t.Errorf("second to last line = %q, want %q", got, want)
+	}
+	if !strings.Contains(stdout, "No services are configured") {
+		t.Errorf("stdout lacks the no services line:\n%s", stdout)
+	}
+}

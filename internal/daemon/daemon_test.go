@@ -60,12 +60,17 @@ func (f *fakeGPU) setFail(fail bool) {
 }
 
 // fakeOllamaServer is enough of Ollama to drive one release. With sticky set
-// the model never leaves /api/ps, however many unloads are accepted.
+// the model never leaves /api/ps, however many unloads are accepted. With
+// flap set an unload is honoured for exactly one /api/ps read and the model
+// is then listed again, which is what a client that reloads it immediately
+// looks like from outside.
 type fakeOllamaServer struct {
-	loaded    atomic.Bool
-	sticky    bool
-	unloadHit atomic.Int32
-	onUnload  func()
+	loaded     atomic.Bool
+	sticky     bool
+	flap       bool
+	emptyReads atomic.Int32
+	unloadHit  atomic.Int32
+	onUnload   func()
 }
 
 func (f *fakeOllamaServer) start(t *testing.T) string {
@@ -75,6 +80,11 @@ func (f *fakeOllamaServer) start(t *testing.T) string {
 		_, _ = io.WriteString(w, `{"version":"0.33.2"}`)
 	})
 	mux.HandleFunc("/api/ps", func(w http.ResponseWriter, r *http.Request) {
+		if f.flap && f.emptyReads.Load() > 0 {
+			f.emptyReads.Add(-1)
+			_, _ = io.WriteString(w, `{"models":[]}`)
+			return
+		}
 		if f.loaded.Load() {
 			_, _ = io.WriteString(w, `{"models":[{"name":"qwen3:8b","model":"qwen3:8b",`+
 				`"size":5368709120,"size_vram":5368709120,"expires_at":"2026-08-30T12:00:00Z"}]}`)
@@ -84,7 +94,10 @@ func (f *fakeOllamaServer) start(t *testing.T) string {
 	})
 	mux.HandleFunc("/api/generate", func(w http.ResponseWriter, r *http.Request) {
 		f.unloadHit.Add(1)
-		if !f.sticky {
+		switch {
+		case f.flap:
+			f.emptyReads.Store(1)
+		case !f.sticky:
 			f.loaded.Store(false)
 		}
 		if f.onUnload != nil {
@@ -97,8 +110,31 @@ func (f *fakeOllamaServer) start(t *testing.T) string {
 	return srv.URL
 }
 
+// fakeClock is an injectable time source that moves only when told to.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
 // testDaemon wires a daemon to fakes and starts it on a socket in a temp dir.
 func testDaemon(t *testing.T, cfg config.Config, source gpu.Source, dryRun bool) string {
+	t.Helper()
+	return startDaemon(t, newTestDaemon(t, cfg, source, dryRun))
+}
+
+func newTestDaemon(t *testing.T, cfg config.Config, source gpu.Source, dryRun bool) *Daemon {
 	t.Helper()
 	if err := config.Validate(&cfg); err != nil {
 		t.Fatalf("config: %v", err)
@@ -108,7 +144,11 @@ func testDaemon(t *testing.T, cfg config.Config, source gpu.Source, dryRun bool)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	return d
+}
 
+func startDaemon(t *testing.T, d *Daemon) string {
+	t.Helper()
 	socket := filepath.Join(t.TempDir(), "gpu-bouncer.sock")
 	t.Setenv(ipc.EnvSocket, socket)
 
@@ -584,5 +624,199 @@ func TestDaemonDrainTimeoutIsAFailedAction(t *testing.T) {
 	}
 	if !strings.Contains(action.Error, "still loaded after 1s") {
 		t.Errorf("Error = %q, want still loaded after 1s", action.Error)
+	}
+}
+
+// unloadsWithin waits up to d for the fake to have seen want unloads and
+// reports whether it did.
+func unloadsWithin(f *fakeOllamaServer, want int32, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if f.unloadHit.Load() >= want {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return f.unloadHit.Load() >= want
+}
+
+// flapSetup is a reactive daemon whose only eviction candidate reloads its
+// model the moment it is released, so every action measures a gain of zero.
+// The clock is injected and frozen, so the cooldown window is under the
+// test's control.
+func flapSetup(t *testing.T, reactive bool) (*fakeOllamaServer, *fakeClock) {
+	t.Helper()
+	flap := &fakeOllamaServer{flap: true}
+	flap.loaded.Store(true)
+	flapURL := flap.start(t)
+	topURL := (&fakeOllamaServer{}).start(t) // up, holding nothing, the defender
+
+	cfg := config.Config{
+		Policy: config.Policy{
+			VRAMFloorMiB:   4096,
+			Reactive:       reactive,
+			PollInterval:   config.Duration(20 * time.Millisecond),
+			MinEffectMiB:   64,
+			ActionCooldown: config.Duration(60 * time.Second),
+		},
+		Services: []config.Service{
+			{Name: "top", Adapter: config.AdapterOllama, Endpoint: topURL, Priority: 90},
+			{Name: "flap", Adapter: config.AdapterOllama, Endpoint: flapURL, Priority: 10,
+				DrainTimeout: config.Duration(100 * time.Millisecond)},
+		},
+	}
+	// 2992 MiB free, below the floor, and nothing an unload changes.
+	hardware := &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 5200}}
+	clock := &fakeClock{t: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)}
+	d := newTestDaemon(t, cfg, hardware, false)
+	d.now = clock.now
+	startDaemon(t, d)
+	return flap, clock
+}
+
+// Invariant: at most one no effect reactive action per service per window.
+func TestCooldownLimitsReactiveActionsToOnePerWindow(t *testing.T) {
+	flap, clock := flapSetup(t, true)
+
+	if !unloadsWithin(flap, 1, 3*time.Second) {
+		t.Fatal("the reactive loop never acted")
+	}
+	time.Sleep(400 * time.Millisecond) // twenty polls
+	if n := flap.unloadHit.Load(); n != 1 {
+		t.Fatalf("flap was released %d times inside one cooldown window, want exactly 1", n)
+	}
+
+	status := call(t, ipc.Request{Op: ipc.OpStatus})
+	if len(status.Cooldowns) != 1 || status.Cooldowns[0].Service != "flap" {
+		t.Fatalf("cooldowns = %+v, want flap listed", status.Cooldowns)
+	}
+	if want := clock.now().Add(60 * time.Second); !status.Cooldowns[0].Until.Equal(want) {
+		t.Errorf("cooldown until %s, want %s", status.Cooldowns[0].Until, want)
+	}
+	if !strings.Contains(status.Cooldowns[0].Reason, "freed 0 MiB, below min_effect_mib 64") {
+		t.Errorf("reason = %q", status.Cooldowns[0].Reason)
+	}
+	plan := call(t, ipc.Request{Op: ipc.OpPlan})
+	if plan.Plan == nil || len(plan.Plan.Actions) != 0 {
+		t.Errorf("plan = %+v, want no action during the cooldown", plan.Plan)
+	}
+	found := false
+	for _, n := range plan.Plan.Notes {
+		if strings.Contains(n, "flap left alone, cooling down until 2026-08-30T12:01:00Z") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("plan notes = %v, want the cooldown named with its end", plan.Plan.Notes)
+	}
+
+	// The next window allows exactly one more.
+	clock.advance(61 * time.Second)
+	if !unloadsWithin(flap, 2, 3*time.Second) {
+		t.Fatal("the reactive loop did not act again after the cooldown ended")
+	}
+	time.Sleep(400 * time.Millisecond)
+	if n := flap.unloadHit.Load(); n != 2 {
+		t.Fatalf("flap was released %d times across two windows, want exactly 2", n)
+	}
+}
+
+// Invariant: an effective action starts no cooldown.
+func TestEffectiveActionStartsNoCooldown(t *testing.T) {
+	fakeOllama := &fakeOllamaServer{}
+	fakeOllama.loaded.Store(true)
+	url := fakeOllama.start(t)
+	hardware := &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 5200}}
+	fakeOllama.onUnload = func() { hardware.setUsed(80) }
+	testDaemon(t, twoServiceConfig(url, false), hardware, false)
+
+	resp := call(t, ipc.Request{Op: ipc.OpRequest, Service: "comfyui", NeedMiB: 6000})
+	if len(resp.Executed) != 1 || !resp.Executed[0].Acted {
+		t.Fatalf("executed = %+v, want one effective action", resp.Executed)
+	}
+	if status := call(t, ipc.Request{Op: ipc.OpStatus}); len(status.Cooldowns) != 0 {
+		t.Errorf("cooldowns = %+v, want none after an action that freed 5120 MiB", status.Cooldowns)
+	}
+}
+
+// Invariant: an explicit evict during a cooldown still acts.
+func TestEvictBypassesCooldown(t *testing.T) {
+	flap, _ := flapSetup(t, true)
+	if !unloadsWithin(flap, 1, 3*time.Second) {
+		t.Fatal("the reactive loop never acted")
+	}
+	if status := call(t, ipc.Request{Op: ipc.OpStatus}); len(status.Cooldowns) != 1 {
+		t.Fatalf("cooldowns = %+v, want flap cooling down", status.Cooldowns)
+	}
+
+	resp := call(t, ipc.Request{Op: ipc.OpEvict, Service: "flap"})
+	if len(resp.Executed) != 1 {
+		t.Fatalf("evict executed %+v, want one action despite the cooldown (notes: %v)", resp.Executed, resp.Plan.Notes)
+	}
+	if n := flap.unloadHit.Load(); n < 2 {
+		t.Errorf("flap was released %d times, want the evict to have added one", n)
+	}
+}
+
+// Invariant: the cooldown ends exactly on time, not a nanosecond early.
+func TestCooldownEndsExactlyOnTime(t *testing.T) {
+	flap, clock := flapSetup(t, true)
+	if !unloadsWithin(flap, 1, 3*time.Second) {
+		t.Fatal("the reactive loop never acted")
+	}
+
+	clock.advance(60*time.Second - time.Nanosecond)
+	time.Sleep(300 * time.Millisecond)
+	if n := flap.unloadHit.Load(); n != 1 {
+		t.Fatalf("flap was released %d times one nanosecond before the cooldown ended, want 1", n)
+	}
+	plan := call(t, ipc.Request{Op: ipc.OpPlan})
+	if plan.Plan == nil || !plan.Plan.Empty() {
+		t.Errorf("plan = %+v, want empty one nanosecond before the end", plan.Plan)
+	}
+
+	clock.advance(time.Nanosecond)
+	if !unloadsWithin(flap, 2, 3*time.Second) {
+		t.Fatal("the reactive loop did not act at the exact end of the cooldown")
+	}
+	if status := call(t, ipc.Request{Op: ipc.OpStatus}); len(status.Cooldowns) != 1 {
+		t.Errorf("cooldowns = %+v, want the second action to have started a new one", status.Cooldowns)
+	}
+}
+
+// Invariant: a standing claim is defended again once the window ends. The
+// request itself acts at once, bypassing nothing because there is nothing to
+// bypass yet; the loop then leaves the useless target alone for one window.
+func TestStandingClaimDefenseResumesAfterCooldown(t *testing.T) {
+	flap, clock := flapSetup(t, false)
+
+	resp := call(t, ipc.Request{Op: ipc.OpRequest, Service: "top", NeedMiB: 6000})
+	if len(resp.Executed) != 1 {
+		t.Fatalf("request executed %+v, want one action", resp.Executed)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if n := flap.unloadHit.Load(); n != 1 {
+		t.Fatalf("flap was released %d times while cooling down under a standing claim, want 1", n)
+	}
+
+	clock.advance(61 * time.Second)
+	if !unloadsWithin(flap, 2, 3*time.Second) {
+		t.Fatal("the standing claim was not defended again after the cooldown")
+	}
+}
+
+// A gpu_index beyond the device count is a startup refusal that names the
+// index and the count, not a daemon that runs and can never act.
+func TestDaemonRefusesIndexBeyondDeviceCount(t *testing.T) {
+	url := (&fakeOllamaServer{}).start(t)
+	cfg := twoServiceConfig(url, false)
+	cfg.Policy.GPUIndex = 9
+	err := runRefusal(t, cfg, &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192}})
+	if err == nil {
+		t.Fatal("daemon started with gpu_index 9 on a one device machine")
+	}
+	want := "policy.gpu_index 9 names no device: the fake source sees 1 device(s), indexes 0 to 0"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
 	}
 }

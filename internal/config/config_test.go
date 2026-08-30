@@ -194,6 +194,41 @@ func TestValidateRejects(t *testing.T) {
 			wantErr: "invalid duration",
 		},
 		{
+			name:    "poll_interval of zero",
+			body:    "[policy]\npoll_interval = \"0s\"\n",
+			wantErr: "policy.poll_interval must be a positive duration",
+		},
+		{
+			name:    "negative poll_interval",
+			body:    "[policy]\npoll_interval = \"-1s\"\n",
+			wantErr: "policy.poll_interval must be a positive duration",
+		},
+		{
+			name:    "action_cooldown of zero",
+			body:    "[policy]\naction_cooldown = \"0s\"\n",
+			wantErr: "policy.action_cooldown must be a positive duration",
+		},
+		{
+			name:    "service timeout of zero",
+			body:    "[[service]]\nname = \"x\"\nadapter = \"ollama\"\nendpoint = \"http://h:1\"\ntimeout = \"0s\"\n",
+			wantErr: `service "x": timeout must be a positive duration`,
+		},
+		{
+			name:    "negative service timeout",
+			body:    "[[service]]\nname = \"x\"\nadapter = \"ollama\"\nendpoint = \"http://h:1\"\ntimeout = \"-1s\"\n",
+			wantErr: `service "x": timeout must be a positive duration`,
+		},
+		{
+			name:    "drain_timeout of zero",
+			body:    "[[service]]\nname = \"x\"\nadapter = \"ollama\"\nendpoint = \"http://h:1\"\ndrain_timeout = \"0s\"\n",
+			wantErr: `service "x": drain_timeout must be a positive duration`,
+		},
+		{
+			name:    "unknown service key names the service",
+			body:    "[[service]]\nname = \"oll\"\nadapter = \"ollama\"\nendpoint = \"http://h:1\"\nbogus_key = 1\n",
+			wantErr: `service "oll": unknown key(s): bogus_key`,
+		},
+		{
 			// A password in the URL would be sent as Basic auth and echoed in
 			// every error string. The message points at the supported way.
 			name:    "endpoint with userinfo",
@@ -212,6 +247,15 @@ func TestValidateRejects(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("error = %q, want it to contain %q", err, tt.wantErr)
 			}
+			if strings.Contains(err.Error(), "u:p@") {
+				t.Errorf("error = %q echoes the password", err)
+			}
+			// A rejection of a key the file set names the file.
+			if strings.Contains(tt.wantErr, "duration") || strings.Contains(tt.wantErr, "unknown key") {
+				if !strings.Contains(err.Error(), path) {
+					t.Errorf("error = %q does not name the file %s", err, path)
+				}
+			}
 		})
 	}
 }
@@ -222,6 +266,12 @@ func TestValidateFillsDefaults(t *testing.T) {
 	cfg, err := LoadFrom([]string{path})
 	if err != nil {
 		t.Fatalf("LoadFrom: %v", err)
+	}
+	if got, want := cfg.Policy.MinEffectMiB, uint64(64); got != want {
+		t.Errorf("min_effect_mib = %d, want %d", got, want)
+	}
+	if got, want := cfg.Policy.ActionCooldown.D(), 60*time.Second; got != want {
+		t.Errorf("action_cooldown = %s, want %s", got, want)
 	}
 	svc := cfg.Services[0]
 	if got, want := svc.Timeout.D(), DefaultServiceTimeout; got != want {

@@ -120,6 +120,14 @@ type Policy struct {
 	PollInterval Duration `toml:"poll_interval"`
 	// GPUIndex selects which GPU to arbitrate. v0.1 arbitrates one GPU.
 	GPUIndex int `toml:"gpu_index"`
+	// MinEffectMiB is the smallest measured gain in free VRAM that counts as
+	// an action having worked. An action that gains less puts its service
+	// into a cooldown, so a service that reloads the moment it is released
+	// is not released once per poll forever.
+	MinEffectMiB uint64 `toml:"min_effect_mib"`
+	// ActionCooldown is how long reactive plans leave a service alone after
+	// an action on it had no effect. Explicit request and evict bypass it.
+	ActionCooldown Duration `toml:"action_cooldown"`
 }
 
 // Config is a fully merged and validated configuration.
@@ -137,10 +145,12 @@ type Config struct {
 func Defaults() Config {
 	return Config{
 		Policy: Policy{
-			VRAMFloorMiB: 512,
-			Reactive:     false,
-			PollInterval: Duration(5 * time.Second),
-			GPUIndex:     0,
+			VRAMFloorMiB:   512,
+			Reactive:       false,
+			PollInterval:   Duration(5 * time.Second),
+			GPUIndex:       0,
+			MinEffectMiB:   64,
+			ActionCooldown: Duration(60 * time.Second),
 		},
 	}
 }
@@ -230,6 +240,30 @@ func mergeFile(cfg *Config, path string, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("config %s: %w", path, err)
 	}
+	var raw map[string]any
+	if _, err := toml.Decode(string(data), &raw); err != nil {
+		return fmt.Errorf("config %s: %w", path, err)
+	}
+	rawServices := serviceBlocks(raw)
+	// A misspelled service key is reported against the service it sits in.
+	// toml.MetaData cannot say which [[service]] block an undecoded key came
+	// from, but the raw decode can.
+	for i, block := range rawServices {
+		var unknown []string
+		for k := range block {
+			if _, known := serviceKeys[k]; !known {
+				unknown = append(unknown, k)
+			}
+		}
+		if len(unknown) > 0 {
+			slices.Sort(unknown)
+			label := fmt.Sprintf("[[service]] #%d", i+1)
+			if i < len(layer.Services) && layer.Services[i].Name != "" {
+				label = fmt.Sprintf("service %q", layer.Services[i].Name)
+			}
+			return fmt.Errorf("config %s: %s: unknown key(s): %s", path, label, strings.Join(unknown, ", "))
+		}
+	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
 		keys := make([]string, 0, len(undecoded))
 		for _, k := range undecoded {
@@ -239,10 +273,6 @@ func mergeFile(cfg *Config, path string, data []byte) error {
 		return fmt.Errorf("config %s: unknown key(s): %s", path, strings.Join(slices.Compact(keys), ", "))
 	}
 
-	var raw map[string]any
-	if _, err := toml.Decode(string(data), &raw); err != nil {
-		return fmt.Errorf("config %s: %w", path, err)
-	}
 	policyKeys := subKeys(raw, "policy")
 	if _, ok := policyKeys["vram_floor_mib"]; ok {
 		cfg.Policy.VRAMFloorMiB = layer.Policy.VRAMFloorMiB
@@ -254,13 +284,24 @@ func mergeFile(cfg *Config, path string, data []byte) error {
 		cfg.Policy.Reactive = layer.Policy.Reactive
 	}
 	if _, ok := policyKeys["poll_interval"]; ok {
+		if layer.Policy.PollInterval <= 0 {
+			return fmt.Errorf("config %s: policy.poll_interval must be a positive duration, got %q", path, layer.Policy.PollInterval.D())
+		}
 		cfg.Policy.PollInterval = layer.Policy.PollInterval
 	}
 	if _, ok := policyKeys["gpu_index"]; ok {
 		cfg.Policy.GPUIndex = layer.Policy.GPUIndex
 	}
+	if _, ok := policyKeys["min_effect_mib"]; ok {
+		cfg.Policy.MinEffectMiB = layer.Policy.MinEffectMiB
+	}
+	if _, ok := policyKeys["action_cooldown"]; ok {
+		if layer.Policy.ActionCooldown <= 0 {
+			return fmt.Errorf("config %s: policy.action_cooldown must be a positive duration, got %q", path, layer.Policy.ActionCooldown.D())
+		}
+		cfg.Policy.ActionCooldown = layer.Policy.ActionCooldown
+	}
 
-	rawServices := serviceBlocks(raw)
 	inThisFile := make(map[string]struct{}, len(layer.Services))
 	for i, svc := range layer.Services {
 		if svc.Name == "" {
@@ -274,6 +315,14 @@ func mergeFile(cfg *Config, path string, data []byte) error {
 		if i < len(rawServices) {
 			keys = rawServices[i]
 		}
+		// A duration a file sets explicitly must be positive. Silently
+		// replacing "0s" with the default would be exactly the kind of quiet
+		// change of behaviour that unknown keys are rejected to prevent.
+		for key, value := range map[string]Duration{"timeout": svc.Timeout, "drain_timeout": svc.DrainTimeout} {
+			if _, set := keys[key]; set && value <= 0 {
+				return fmt.Errorf("config %s: service %q: %s must be a positive duration, got %q", path, svc.Name, key, value.D())
+			}
+		}
 		if idx := indexOfService(cfg.Services, svc.Name); idx >= 0 {
 			mergeService(&cfg.Services[idx], svc, keys)
 			continue
@@ -281,6 +330,13 @@ func mergeFile(cfg *Config, path string, data []byte) error {
 		cfg.Services = append(cfg.Services, svc)
 	}
 	return nil
+}
+
+// serviceKeys is every key a [[service]] block may set. It mirrors the toml
+// tags on Service and is what the per service unknown key error checks.
+var serviceKeys = map[string]struct{}{
+	"name": {}, "adapter": {}, "endpoint": {}, "unit": {}, "user_unit": {},
+	"priority": {}, "allow_stop": {}, "timeout": {}, "drain_timeout": {},
 }
 
 // subKeys returns the set of keys present in the named top level table.
@@ -372,8 +428,13 @@ var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 // exported so that tests and `gpu-bouncer plan` can validate a hand-built
 // config without touching the filesystem.
 func Validate(cfg *Config) error {
+	// These can only be non positive in a Config built in code without going
+	// through Defaults; a file that sets them so is refused in mergeFile.
 	if cfg.Policy.PollInterval <= 0 {
 		cfg.Policy.PollInterval = Duration(5 * time.Second)
+	}
+	if cfg.Policy.ActionCooldown <= 0 {
+		cfg.Policy.ActionCooldown = Duration(60 * time.Second)
 	}
 	if cfg.Policy.GPUIndex < 0 {
 		return fmt.Errorf("policy.gpu_index must not be negative, got %d", cfg.Policy.GPUIndex)

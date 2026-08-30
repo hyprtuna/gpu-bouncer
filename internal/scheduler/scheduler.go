@@ -75,6 +75,12 @@ type ServiceState struct {
 	// ProbeErr is non empty when the last probe failed. A service we cannot
 	// see is never acted on.
 	ProbeErr string
+
+	// CooldownUntil, when set, marks a service that a recent action did not
+	// help. Reactive plans leave it alone until then; the daemon sets it only
+	// on the observations it builds for its own poll loop, so an explicit
+	// request or evict never sees it.
+	CooldownUntil time.Time
 }
 
 // Claim is an outstanding explicit request for the GPU.
@@ -319,6 +325,10 @@ func evictionCandidates(services []ServiceState, beneficiary ServiceState) (cand
 			continue
 		case s.HeldMiB == 0:
 			notes = append(notes, fmt.Sprintf("%s left alone, it holds no VRAM", s.Name))
+			continue
+		case !s.CooldownUntil.IsZero():
+			notes = append(notes, fmt.Sprintf("%s left alone, cooling down until %s after an action on it freed nothing",
+				s.Name, s.CooldownUntil.Format(time.RFC3339)))
 			continue
 		}
 		candidates = append(candidates, s)
