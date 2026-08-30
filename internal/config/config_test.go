@@ -175,12 +175,12 @@ func TestValidateRejects(t *testing.T) {
 		},
 		{
 			name:    "duplicate service name",
-			body:    "[[service]]\nname = \"x\"\nadapter = \"systemd-unit\"\nunit = \"u\"\n\n[[service]]\nname = \"x\"\nadapter = \"systemd-unit\"\nunit = \"v\"\n",
+			body:    "[[service]]\nname = \"x\"\nadapter = \"systemd-unit\"\nunit = \"u.service\"\n\n[[service]]\nname = \"x\"\nadapter = \"systemd-unit\"\nunit = \"v.service\"\n",
 			wantErr: "defined twice",
 		},
 		{
 			name:    "bad service name",
-			body:    "[[service]]\nname = \"has space\"\nadapter = \"systemd-unit\"\nunit = \"u\"\n",
+			body:    "[[service]]\nname = \"has space\"\nadapter = \"systemd-unit\"\nunit = \"u.service\"\n",
 			wantErr: "name must match",
 		},
 		{

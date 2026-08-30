@@ -195,8 +195,9 @@ type ConfigReport struct {
 	Path string `json:"path"`
 	// Paths is the same list unjoined, so a client can re-read exactly the
 	// files the daemon read rather than guess at them by splitting a string.
-	// A daemon too old to send it still sends Path.
-	Paths []string `json:"paths,omitempty"`
+	// A daemon too old to send it still sends Path; from this one it is
+	// present and empty as [], like every other list on the wire.
+	Paths []string `json:"paths"`
 	// SHA256 is a digest over the contents of those files, in load order,
 	// and nothing else. A client recomputes it over the same paths with
 	// config.ContentDigest.

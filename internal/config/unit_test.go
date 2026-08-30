@@ -106,3 +106,36 @@ func TestAConfigFileWithABadUnitIsRefused(t *testing.T) {
 		t.Errorf("unit = %q, want ollama.service", cfg.Services[0].Unit)
 	}
 }
+
+// The refusal names the file the unit is in. validateUnit runs from Validate,
+// after every file has been merged, where nothing knows which file supplied a
+// value: an operator with a system file and a user overlay was told which
+// service and which key were wrong, but not which of the two files to edit.
+// Every numeric bound has named the file all along.
+func TestABadUnitNamesTheFileItIsIn(t *testing.T) {
+	dir := t.TempDir()
+	system := writeFile(t, dir, "system.toml", "[policy]\nvram_floor_mib = 512\n")
+	user := writeFile(t, dir, "user.toml",
+		"[[service]]\nname = \"oll\"\nadapter = \"systemd-unit\"\nunit = \"bad name.service\"\n")
+
+	_, err := LoadFrom([]string{system, user})
+	if err == nil {
+		t.Fatal("a unit holding a space was accepted")
+	}
+	for _, want := range []string{user, `service "oll"`, "must match"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), system) {
+		t.Errorf("error = %q, want it to name only the file holding the unit", err)
+	}
+
+	// A numeric bound in the same position reads the same way, which is the
+	// consistency this fix is about.
+	badFloor := writeFile(t, dir, "floor.toml", "[policy]\nvram_floor_mib = -1\n")
+	_, err = LoadFrom([]string{system, badFloor})
+	if err == nil || !strings.Contains(err.Error(), badFloor) {
+		t.Errorf("a numeric bound error = %v, want it to name %s", err, badFloor)
+	}
+}

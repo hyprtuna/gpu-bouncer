@@ -188,6 +188,65 @@ MD
 expect_notes "a heading quoted in prose is not a second section" v1.2.3 "$tmp/prose.md" \
   '- the section headed `## [1.2.3]` is written by hand'
 
+# An indented fence is a fence. Matching only at column 1 let a heading
+# inside an indented block end the section, and the notes were published
+# truncated to whatever came before it.
+cat > "$tmp/fence_indented.md" <<'MD'
+## [1.2.3] - 2026-01-01
+
+- before the fence
+
+    ```
+## [9.9.9] - 1999-01-01
+    ```
+
+- after the fence
+
+## [1.2.2] - 2025-12-01
+
+- old
+MD
+expect_notes "an indented fence is a fence" v1.2.3 "$tmp/fence_indented.md" \
+  $'- before the fence\n\n    ```\n## [9.9.9] - 1999-01-01\n    ```\n\n- after the fence'
+
+# The same block, counted: a duplicate heading inside an indented fence is an
+# example, not a second section, and must not block the release.
+cat > "$tmp/fence_indented_dup.md" <<'MD'
+## [1.2.3] - 2026-01-01
+
+  ~~~
+## [1.2.3]
+  ~~~
+
+- real content
+MD
+expect_notes "a heading inside an indented fence is not a second section" v1.2.3 "$tmp/fence_indented_dup.md" \
+  $'  ~~~\n## [1.2.3]\n  ~~~\n\n- real content'
+
+# A fence nobody closed swallows every section below it. Publishing an older
+# release's notes under this tag is worse than publishing nothing.
+cat > "$tmp/fence_unclosed.md" <<'MD'
+## [1.2.3] - 2026-01-01
+
+- one
+
+```
+## [1.2.2] - 2025-12-01
+
+- old
+MD
+expect_fail "an unclosed fence" v1.2.3 "$tmp/fence_unclosed.md" "code fence that is never closed"
+
+cat > "$tmp/fence_unclosed_indented.md" <<'MD'
+## [1.2.3] - 2026-01-01
+
+- one
+
+    ~~~
+- two
+MD
+expect_fail "an unclosed indented fence" v1.2.3 "$tmp/fence_unclosed_indented.md" "code fence that is never closed"
+
 # A real duplicate is still a duplicate, fences and prose notwithstanding.
 cat > "$tmp/real_dup.md" <<'MD'
 ## [1.2.3] - 2026-01-01

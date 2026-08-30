@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/hyprtuna/gpu-bouncer/internal/ipc"
 	"github.com/hyprtuna/gpu-bouncer/internal/scheduler"
@@ -81,6 +82,32 @@ func orEmpty[T any](s []T) []T {
 	return s
 }
 
+// configOut carries daemon_config through the same list guarantee as the top
+// level: paths is present, and empty as [], whatever answered. A daemon too
+// old to send the list sent the joined path instead, and the two must not
+// contradict each other.
+func configOut(report *ipc.ConfigReport) *ipc.ConfigReport {
+	if report == nil {
+		return nil
+	}
+	out := *report
+	out.Paths = pathsOf(*report)
+	return &out
+}
+
+// pathsOf is the list of files a daemon loaded. A daemon too old to send the
+// list still sends the joined form, which status itself built with this
+// separator.
+func pathsOf(report ipc.ConfigReport) []string {
+	if len(report.Paths) > 0 {
+		return report.Paths
+	}
+	if report.Path == "" {
+		return []string{}
+	}
+	return strings.Split(report.Path, ", ")
+}
+
 // planOf dereferences a plan, giving an empty one with present lists when
 // the daemon sent none.
 func planOf(p *scheduler.Plan) scheduler.Plan {
@@ -101,7 +128,7 @@ func statusOutputOf(r ipc.Response) statusOutput {
 		Services:     servicesOut(r.Services),
 		Claims:       orEmpty(r.Claims),
 		Cooldowns:    orEmpty(r.Cooldowns),
-		DaemonConfig: r.DaemonConfig,
+		DaemonConfig: configOut(r.DaemonConfig),
 	}
 	if r.DaemonRunning != nil {
 		out.DaemonRunning = *r.DaemonRunning

@@ -206,7 +206,7 @@ var NumericBounds = []Bound{
 	{Table: "policy", Key: "poll_interval", Duration: true, Min: int64(MinPollInterval)},
 	{Table: "policy", Key: "action_cooldown", Duration: true, Min: 1},
 	{Table: "service", Key: "priority", Signed: true},
-	{Table: "service", Key: "timeout", Duration: true, Min: 1},
+	{Table: "service", Key: "timeout", Duration: true, Min: 1, Max: int64(MaxServiceTimeout)},
 	{Table: "service", Key: "drain_timeout", Duration: true, Min: 1, Max: int64(MaxDrainTimeout)},
 }
 
@@ -288,6 +288,16 @@ const DefaultDrainTimeout = 30 * time.Second
 // ten minutes the service is not draining, it is stuck, and saying so beats
 // waiting longer.
 const MaxDrainTimeout = 10 * time.Minute
+
+// MaxServiceTimeout is the longest timeout a config file may set. A timeout
+// is how long one request to one service may take before the daemon gives up
+// on it, and every deadline downstream is built by adding to it: the client's
+// wait for the plan and the daemon's budget for the control connection. An
+// hour is already far past the point where a service is answering; without
+// any bound at all, a config the binary accepted could make that sum overflow
+// an int64 and silently return the client to its fixed 90 second wait, which
+// is the opposite of what setting a long timeout asks for.
+const MaxServiceTimeout = time.Hour
 
 const (
 	systemPath  = "/etc/gpu-bouncer/config.toml"
@@ -460,6 +470,16 @@ func mergeFile(cfg *Config, path string, data []byte) error {
 		}
 		if err := checkBounds(path, "service", label, block); err != nil {
 			return err
+		}
+		// A unit is checked here as well as in Validate, so that the
+		// refusal names the file holding it. Validate runs after every file
+		// has been merged and no longer knows which one supplied a value,
+		// which left an operator with a layered install told that a unit
+		// was wrong but not where to fix it.
+		if unit, ok := block["unit"].(string); ok {
+			if err := validateUnit(unit); err != nil {
+				return fmt.Errorf("config %s: %s: %w", path, label, err)
+			}
 		}
 	}
 

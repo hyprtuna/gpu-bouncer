@@ -210,7 +210,8 @@ $XDG_CONFIG_HOME/gpu-bouncer/config.toml     (defaults to ~/.config)
 error rather than being ignored, because a misspelled policy key would silently
 change what the daemon is willing to do. So is a number outside its range: a
 negative `vram_floor_mib`, `min_effect_mib` or `gpu_index`, a duration of zero
-or less, a `poll_interval` under `1s`, or a `drain_timeout` over `10m`. Only
+or less, a `poll_interval` under `1s`, a `timeout` over `1h`, or a
+`drain_timeout` over `10m`. Only
 `priority` may be negative, and it has no range beyond what an integer holds.
 Duration keys take a quoted duration string such as `"5s"`; a bare number on
 one is a wrong type, not a zero.
@@ -238,7 +239,7 @@ one is a wrong type, not a zero.
 | `user_unit` | `false` | Use `systemctl --user`. |
 | `priority` | `0` | Higher wins. Equal priority never evicts. |
 | `allow_stop` | `false` | Required before any process level action. |
-| `timeout` | `"5s"` | Bounds every request to this service. |
+| `timeout` | `"5s"` | Bounds every request to this service, at most `"1h"`. |
 | `drain_timeout` | `"30s"` | How long a release waits for the service to confirm the unload, at most `"10m"`. Only `ollama` waits; a release still loaded when it expires is a failed action. |
 
 See [packaging/config.example.toml](packaging/config.example.toml) for a

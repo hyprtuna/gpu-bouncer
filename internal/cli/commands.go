@@ -21,9 +21,11 @@ import (
 	"github.com/hyprtuna/gpu-bouncer/internal/scheduler"
 )
 
-// probeTimeout bounds a one shot read only command. The per service timeout
+// probeTimeout bounds a one shot read only command. It is a var only so that
+// a test can wait out a silent daemon in milliseconds instead of half a
+// minute; nothing changes it at runtime. The per service timeout
 // from the config still applies inside it.
-const probeTimeout = 30 * time.Second
+var probeTimeout = 30 * time.Second
 
 // flagSet is a flag.FlagSet whose own output is silenced. The flag package
 // prints a parse error and a usage dump before returning the error, which
@@ -240,7 +242,19 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 	// the one wrong answer here that matters.
 	var daemonDry *bool
 	var configNote string
-	if resp, err := ipc.Do(ctx, ipc.Request{Op: ipc.OpPing}); err == nil && resp.OK {
+	// daemonNote replaces the running/not running line when a daemon is there
+	// but could not be asked anything, which is neither of the two.
+	var daemonNote string
+	resp, err := ipc.Do(ctx, ipc.Request{Op: ipc.OpPing})
+	switch {
+	case err != nil && !errors.Is(err, ipc.ErrNoDaemon):
+		// Something accepted the connection, so a daemon is running. Reading
+		// that as absence told the operator to start one alongside it, and
+		// reported the fields it never answered on as settled facts.
+		daemonUp = true
+		daemonNote = fmt.Sprintf("A daemon is running: %s, so what it has loaded "+
+			"and whether it is acting cannot be reported.", err)
+	case err == nil && resp.OK:
 		daemonUp = true
 		daemonDry = resp.DaemonDryRun
 		if claims, err := ipc.Do(ctx, ipc.Request{Op: ipc.OpStatus}); err == nil {
@@ -268,7 +282,7 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 	if g.asJSON {
 		return writeJSON(env, statusOutputOf(report))
 	}
-	printStatus(env, report, cfg.Sources, cfg.Policy.GPUIndex, daemonUp, daemonDry, configNote)
+	printStatus(env, report, cfg.Sources, cfg.Policy.GPUIndex, daemonNote, daemonDry, configNote)
 	return nil
 }
 
@@ -286,12 +300,7 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 // The returned pointer is nil when the question could not be answered, which
 // is not the same as answering no: the sentence says which it was.
 func configDrift(report ipc.ConfigReport) (*bool, string) {
-	paths := report.Paths
-	if len(paths) == 0 && report.Path != "" {
-		// A daemon too old to send the list still sends the joined form,
-		// which status itself built with this separator.
-		paths = strings.Split(report.Path, ", ")
-	}
+	paths := pathsOf(report)
 	if len(paths) == 0 {
 		// Not stale: a daemon that loaded no file cannot be running on an
 		// older edit of one. Worth saying, because it means the daemon is
@@ -606,7 +615,7 @@ func gpuHeading(g ipc.GPUReport) string {
 	return heading
 }
 
-func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, daemonUp bool, daemonDry *bool, configNote string) {
+func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, daemonNote string, daemonDry *bool, configNote string) {
 	out := env.Stdout
 
 	switch {
@@ -715,7 +724,10 @@ func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, d
 		fmt.Fprintln(out)
 	}
 
+	daemonUp := report.DaemonRunning != nil && *report.DaemonRunning
 	switch {
+	case daemonNote != "":
+		fmt.Fprintln(out, daemonNote)
 	case daemonUp && daemonDry == nil:
 		fmt.Fprintln(out, "A daemon is running. It is older than this client and does not report "+
 			"whether it is in dry-run mode, so it may be planning and never acting.")

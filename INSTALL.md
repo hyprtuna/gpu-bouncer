@@ -152,8 +152,11 @@ default: `vram_floor_mib = 512`, `reactive = false`, `poll_interval = "5s"`,
 `gpu_index = 0`, `min_effect_mib = 64`, `action_cooldown = "60s"`, and per
 service a `timeout` of `5s` and a `drain_timeout` of `30s`. A number outside
 its range is an error, not a request for the default: a duration of zero or
-less, a `poll_interval` under `1s`, a `drain_timeout` over `10m`, or a
-negative `vram_floor_mib`, `min_effect_mib` or `gpu_index`. `priority` is the
+less, a `poll_interval` under `1s`, a `timeout` over `1h`, a `drain_timeout`
+over `10m`, or a negative `vram_floor_mib`, `min_effect_mib` or `gpu_index`.
+A `timeout` is bounded because every deadline built from it is that value
+plus another, and a config the binary accepted could make that sum overflow
+and put the client back on its fixed wait. `priority` is the
 one key that may be negative. Every duration key takes a quoted duration
 string, so `poll_interval = 0` is refused as a wrong type rather than read as
 zero and replaced.
