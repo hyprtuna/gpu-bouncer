@@ -130,6 +130,13 @@ type Response struct {
 	Cooldowns []CooldownReport `json:"cooldowns,omitempty"`
 	Message   string           `json:"message,omitempty"`
 
+	// DaemonConfig is set by the daemon on ping and status replies: which
+	// files it loaded, their digest, and when. ConfigStale is set by the
+	// status command when the files it read differ from what the daemon
+	// loaded, which means the daemon is running on an older edit.
+	DaemonConfig *ConfigReport `json:"daemon_config,omitempty"`
+	ConfigStale  *bool         `json:"config_stale,omitempty"`
+
 	// DaemonDryRun is set by the daemon on ping and status replies: true when
 	// it was started with --dry-run and therefore plans but never acts and
 	// records no claims.
@@ -147,6 +154,14 @@ type ClaimReport struct {
 	Service string    `json:"service"`
 	NeedMiB uint64    `json:"need_mib"`
 	At      time.Time `json:"at"`
+}
+
+// ConfigReport identifies the configuration a daemon is running on.
+type ConfigReport struct {
+	// Path is the file or files loaded, joined the way status prints them.
+	Path     string    `json:"path"`
+	SHA256   string    `json:"sha256"`
+	LoadedAt time.Time `json:"loaded_at"`
 }
 
 // CooldownReport is one service that reactive plans are leaving alone until

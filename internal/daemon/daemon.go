@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -387,7 +388,7 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request) ipc.Response {
 	switch req.Op {
 	case ipc.OpPing:
 		dry := d.dryRun
-		return ipc.Response{OK: true, Message: "gpu-bouncer daemon is running", DaemonDryRun: &dry}
+		return ipc.Response{OK: true, Message: "gpu-bouncer daemon is running", DaemonDryRun: &dry, DaemonConfig: d.configReport()}
 	case ipc.OpStatus:
 		return d.handleStatus(ctx)
 	case ipc.OpPlan:
@@ -403,9 +404,20 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request) ipc.Response {
 	}
 }
 
+// configReport says which configuration this daemon loaded. The daemon never
+// reloads, so a client comparing it with the files on disk can tell whether
+// an edit has taken effect.
+func (d *Daemon) configReport() *ipc.ConfigReport {
+	return &ipc.ConfigReport{
+		Path:     strings.Join(d.cfg.Sources, ", "),
+		SHA256:   d.cfg.Hash,
+		LoadedAt: d.cfg.LoadedAt,
+	}
+}
+
 func (d *Daemon) handleStatus(ctx context.Context) ipc.Response {
 	dry := d.dryRun
-	resp := ipc.Response{OK: true, DaemonDryRun: &dry}
+	resp := ipc.Response{OK: true, DaemonDryRun: &dry, DaemonConfig: d.configReport()}
 	device, err := d.observer.Device(ctx)
 	report := ipc.GPUReportOf(device, "")
 	if err != nil {

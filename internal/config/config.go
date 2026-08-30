@@ -12,6 +12,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -140,6 +142,12 @@ type Config struct {
 	// Sources lists the files that contributed, in load order. It is not
 	// itself settable from a config file.
 	Sources []string `toml:"-"`
+	// Hash is a SHA-256 over the bytes of every file in Sources, in load
+	// order, and LoadedAt is when they were read. The daemon reports both, so
+	// a client that read the files itself can tell whether the daemon is
+	// still running on an older edit.
+	Hash     string    `toml:"-"`
+	LoadedAt time.Time `toml:"-"`
 }
 
 // Defaults returns the configuration used when no file exists anywhere. It is
@@ -302,6 +310,7 @@ func Load() (Config, error) {
 func LoadFrom(paths []string) (Config, error) {
 	cfg := Defaults()
 	explicit := os.Getenv(EnvConfig) != ""
+	digest := sha256.New()
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -317,10 +326,18 @@ func LoadFrom(paths []string) (Config, error) {
 			return Config{}, err
 		}
 		cfg.Sources = append(cfg.Sources, path)
+		// The path is part of the digest: the same bytes moved to another
+		// file are a different configuration to the daemon that loaded it.
+		digest.Write([]byte(path))
+		digest.Write([]byte{0})
+		digest.Write(data)
+		digest.Write([]byte{0})
 	}
 	if err := Validate(&cfg); err != nil {
 		return Config{}, err
 	}
+	cfg.Hash = hex.EncodeToString(digest.Sum(nil))
+	cfg.LoadedAt = time.Now()
 	return cfg, nil
 }
 

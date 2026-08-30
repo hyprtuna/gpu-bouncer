@@ -103,6 +103,29 @@ func startDaemonWith(t *testing.T, dryRun bool, services ...config.Service) {
 	if err := config.Validate(&cfg); err != nil {
 		t.Fatalf("config: %v", err)
 	}
+	startDaemonFromConfig(t, cfg, dryRun)
+}
+
+// startDaemonFromFile writes body to a config file, points the CLI at it
+// through GPU_BOUNCER_CONFIG, and starts a daemon that loaded that file, the
+// way the real daemon does. It returns the path so a test can edit it.
+func startDaemonFromFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "c.toml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvConfig, path)
+	cfg, err := config.LoadFrom([]string{path})
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	startDaemonFromConfig(t, cfg, false)
+	return path
+}
+
+func startDaemonFromConfig(t *testing.T, cfg config.Config, dryRun bool) {
+	t.Helper()
 	d, err := daemon.New(cfg, fixedGPU{}, slog.New(slog.NewTextHandler(io.Discard, nil)), dryRun)
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
@@ -586,5 +609,54 @@ func TestStatusNamesADryRunDaemon(t *testing.T) {
 	}
 	if !decoded.DaemonRunning || !decoded.DaemonDryRun {
 		t.Errorf("daemon_running = %v, daemon_dry_run = %v; want both true", decoded.DaemonRunning, decoded.DaemonDryRun)
+	}
+}
+
+// After an edit to the config file, status says the daemon is still running
+// on the file it loaded, in text and in JSON, until the daemon restarts.
+func TestStatusNoticesAStaleDaemonConfig(t *testing.T) {
+	url := fakeOllama(t, http.StatusOK)
+	path := startDaemonFromFile(t, "[policy]\nvram_floor_mib = 512\npoll_interval = \"1h\"\n[[service]]\nname = \"good\"\nadapter = \"ollama\"\nendpoint = \""+url+"\"\n")
+
+	code, stdout, stderr := run("status")
+	if code != 0 {
+		t.Fatalf("status: exit %d: %s", code, stderr)
+	}
+	if strings.Contains(stdout, "loaded a different config") {
+		t.Errorf("status reports a stale config before any edit:\n%s", stdout)
+	}
+	_, stdout, _ = run("--json", "status")
+	var decoded struct {
+		ConfigStale  *bool `json:"config_stale"`
+		DaemonConfig *struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+		} `json:"daemon_config"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("stdout is not JSON: %v", err)
+	}
+	if decoded.ConfigStale == nil || *decoded.ConfigStale || decoded.DaemonConfig == nil || decoded.DaemonConfig.Path != path {
+		t.Errorf("before the edit: config_stale = %v, daemon_config = %+v", decoded.ConfigStale, decoded.DaemonConfig)
+	}
+
+	// Rename the service in the file; the daemon still holds the old name.
+	if err := os.WriteFile(path, []byte("[policy]\nvram_floor_mib = 512\npoll_interval = \"1h\"\n[[service]]\nname = \"renamed\"\nadapter = \"ollama\"\nendpoint = \""+url+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, _ = run("status")
+	if code != 0 {
+		t.Fatalf("status after the edit: exit %d", code)
+	}
+	want := "the daemon loaded a different config (" + path + ", loaded "
+	if !strings.Contains(stdout, want) || !strings.Contains(stdout, "); restart it to apply your edit") {
+		t.Errorf("status after the edit lacks the stale config line:\n%s", stdout)
+	}
+	_, stdout, _ = run("--json", "status")
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("stdout is not JSON: %v", err)
+	}
+	if decoded.ConfigStale == nil || !*decoded.ConfigStale {
+		t.Errorf("after the edit: config_stale = %v, want true", decoded.ConfigStale)
 	}
 }

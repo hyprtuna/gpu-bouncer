@@ -1049,3 +1049,50 @@ func TestShutdownDuringDrainIsPrompt(t *testing.T) {
 		t.Errorf("socket still exists after shutdown: %v", err)
 	}
 }
+
+// The daemon never reloads, so its status reply names the configuration it
+// loaded, with a digest a client can compare against the files on disk.
+func TestStatusReportsTheLoadedConfig(t *testing.T) {
+	url := (&fakeOllamaServer{}).start(t)
+	path := filepath.Join(t.TempDir(), "c.toml")
+	body := "[policy]\nvram_floor_mib = 512\npoll_interval = \"1h\"\n[[service]]\nname = \"ollama\"\nadapter = \"ollama\"\nendpoint = \"" + url + "\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFrom([]string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Hash == "" || cfg.LoadedAt.IsZero() {
+		t.Fatalf("LoadFrom left Hash %q, LoadedAt %v", cfg.Hash, cfg.LoadedAt)
+	}
+	testDaemon(t, cfg, &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192}}, false)
+
+	status := call(t, ipc.Request{Op: ipc.OpStatus})
+	if status.DaemonConfig == nil {
+		t.Fatal("status carries no daemon_config")
+	}
+	if status.DaemonConfig.Path != path || status.DaemonConfig.SHA256 != cfg.Hash || !status.DaemonConfig.LoadedAt.Equal(cfg.LoadedAt) {
+		t.Errorf("daemon_config = %+v, want path %s, sha %s, loaded %s", status.DaemonConfig, path, cfg.Hash, cfg.LoadedAt)
+	}
+
+	// An edit on disk changes what a fresh load sees and not what the daemon
+	// reports, which is exactly the mismatch the client is meant to notice.
+	if err := os.WriteFile(path, []byte(body+"\n# edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edited, err := config.LoadFrom([]string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.Hash == cfg.Hash {
+		t.Fatal("an edited file produced the same digest")
+	}
+	after := call(t, ipc.Request{Op: ipc.OpStatus})
+	if after.DaemonConfig.SHA256 != cfg.Hash {
+		t.Errorf("the daemon's digest changed to %s after an edit, want the loaded %s", after.DaemonConfig.SHA256, cfg.Hash)
+	}
+	if ping := call(t, ipc.Request{Op: ipc.OpPing}); ping.DaemonConfig == nil || ping.DaemonConfig.SHA256 != cfg.Hash {
+		t.Errorf("ping daemon_config = %+v, want the loaded digest", ping.DaemonConfig)
+	}
+}
