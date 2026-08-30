@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-30
+
+A second fix round. As before, an existing config file keeps loading: the
+one new bound, a `poll_interval` under `1s`, was never a working setting.
+
+### Fixed
+
+- **A negative `vram_floor_mib` or `min_effect_mib` was accepted and wrapped
+  to 18446744073709551615**, which made reactive mode fire on every poll and
+  disabled the cooldown, while `poll_interval = "-1s"` was already refused.
+  Every numeric key now has a declared range checked on the raw value before
+  it reaches a typed field; a negative unsigned key is a hard error naming
+  the key and the file. `poll_interval` has a lower bound of `1s`.
+  `priority` stays signed by design. A test enumerates every numeric field
+  by reflection and fails when one has no bound.
+- **A `--dry-run` daemon recorded claims it could never release.** It now
+  records nothing: `request` returns the plan and says the daemon is in
+  dry-run mode, `release` says there is nothing to release, and `status`
+  says `A daemon is running in dry-run mode: it plans and never acts.`
+- **The sysfs source dropped a card whose `device` directory it could not
+  traverse**, renumbering every card after it, and **one card with a missing
+  or unparsable counter hid every card**. Only a missing `device/vendor`
+  means a virtual card now; any other failure leaves that card in the
+  numbering as present and unreadable with the error, and the other cards
+  stay readable. An unreadable vendor file is reported as such.
+- **A cgo build whose NVML failed to load was told it needs a build with
+  cgo.** The fallback source keeps the NVML error, and an NVIDIA card's
+  reason now starts with it (`nvml: init: ...`) and says NVML is present in
+  this build but could not be opened; a build without NVML support says so
+  instead. `plan`'s note and the daemon's refusal carry the same text.
+- **The poll loop blocked on actions.** An Ollama drain on one service
+  stopped the observation of every other service for up to `drain_timeout`.
+  Actions now run on their own goroutines, at most one per service at a
+  time; a plan passes over a service whose action is still in flight, with a
+  note; observation, claims and `status` continue every poll; a client's
+  `request` or `evict` still waits for its own actions.
+- **`gpu-bouncer --json` with no command printed the usage and no JSON, and
+  `--json <unknown command>` printed the usage before the JSON.** Both emit
+  only `{"ok": false, "error": "..."}` and exit 2.
+- **`status --json` reported `gpu.index` 0 for a `gpu_index` that names no
+  device**; it reports the configured index.
+- **A second `request` for the same service reset its timestamp**, losing an
+  equal priority tie to a peer that asked in between. It now updates the
+  amount, keeps the original time, and says `updated the claim held since
+  <time>`.
+- **`--log-level debug` logged nothing beyond `info`.** See Added.
+- **`release-notes.sh` could not publish a pre-release tag and silently
+  concatenated a duplicated section.** Headings may carry a pre-release or
+  build suffix, a duplicated version is refused, and the script has tests the
+  gate runs.
+- A service name echoed into an error is elided at 80 characters. Every
+  expired cooldown is swept whether or not its service was observed.
+  `evict --all-except` with an unknown name and no GPU reading reports both
+  reasons. The `unload_all_models` citation was already fixed in 0.1.1; the
+  README's "exits 1" sentence is scoped to the state changing commands.
+
+### Changed
+
+- The `--json` shapes are owned by the command line: every list is present,
+  empty as `[]`, never null or absent, and INSTALL.md documents the complete
+  `status`, `plan`, `request`, `evict`, `release` and `version` responses.
+- A `request` that could not reach its target still exits 0, but its last
+  text line always reads `freed X MiB of the Y MiB asked for`, with
+  `, target not met` when it was not, and the JSON carries `target_met`.
+- README documents the exit codes: 0, 1 (an error or a failed action), 2 (no
+  command or an unknown one).
+
+### Added
+
+- **`status` notices a stale daemon config.** The daemon never reloads; its
+  ping and status replies now carry `daemon_config` (path, SHA-256 of the
+  loaded files, load time), and `status` ends with `the daemon loaded a
+  different config (<path>, loaded <time>); restart it to apply your edit`
+  when the files it read differ, with `config_stale` in JSON. INSTALL.md
+  documents that the daemon does not reload and shows the restart command
+  for each unit.
+- **Debug logging.** At `--log-level debug` the daemon writes one line per
+  poll with the VRAM reading and every service's observed state, and one
+  line per adapter HTTP request with method, redacted URL, status and
+  duration. Headers are never logged, and a test proves a llama-swap API
+  key never reaches the log.
+- `daemon_dry_run`, `daemon_config`, `config_stale` and `target_met` in the
+  JSON output; `claims` and `cooldowns` documented.
+- A troubleshooting entry for a reverse proxy that redirects `http` to
+  `https`, which makes a working service read as `down` by design.
+- Dependabot watches Go modules weekly.
+
 ## [0.1.1] - 2026-08-30
 
 A fix round after the release audit of 0.1.0. Nothing here changes the
@@ -238,6 +325,7 @@ do not cooperate with each other.
   with a `.sha256` alongside it, and gated behind a GitHub environment that
   requires a human reviewer.
 
-[Unreleased]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hyprtuna/gpu-bouncer/releases/tag/v0.1.0
