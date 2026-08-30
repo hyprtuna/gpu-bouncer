@@ -76,7 +76,12 @@ func (o *Observer) Device(ctx context.Context) (gpu.Device, error) {
 			index, o.source.Name(), len(devices), len(devices)-1)
 	}
 	if dev.Unreadable != "" {
-		return dev, fmt.Errorf("GPU %d (%s) cannot be read by the %s source: %s", index, describe(dev), o.source.Name(), dev.Unreadable)
+		// The reason leads. It is what the operator has to act on, and on
+		// an NVIDIA card it is NVML's own failure text; putting sixty
+		// characters of device identification in front of it buried the
+		// one line that says what to fix. The identification follows, so
+		// nothing is lost from the message, only reordered.
+		return dev, fmt.Errorf("%s (GPU %d: %s, %s source)", dev.Unreadable, index, describe(dev), o.source.Name())
 	}
 	return dev, nil
 }

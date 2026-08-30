@@ -49,6 +49,49 @@ type sysfsCard struct {
 // pciAddressRE matches a PCI address such as 0000:01:00.0.
 var pciAddressRE = regexp.MustCompile(`^[0-9a-fA-F]{4,}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]$`)
 
+// classifyCard decides whether a card directory belongs to a virtual device
+// with no VRAM anyone arbitrates, and if not, what stopped its vendor from
+// being read.
+//
+// A card without a PCI vendor is virtual (simpledrm, vkms, a framebuffer)
+// and is left out, which is the one case where leaving a card out is right.
+// Everything else keeps its index: dropping a card renumbers every card
+// after it, so a card that might be real is always listed, unreadable, with
+// the reason. The distinction is whether the device directory could be
+// reached at all. os.Stat alone cannot make it, because it follows the
+// device symlink and so reports a dangling link as an absent vendor file,
+// which dropped a real card and renumbered the next one.
+func classifyCard(devicePath string) (virtual bool, vendorErr error) {
+	// Lstat, so a dangling symlink is seen as the entry it is rather than
+	// as the target it fails to reach.
+	if _, err := os.Lstat(devicePath); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// No device entry at all: nothing is behind this card.
+			return true, nil
+		}
+		return false, err
+	}
+	info, err := os.Stat(devicePath)
+	switch {
+	case err != nil:
+		// The entry exists but does not lead anywhere readable: a dangling
+		// link, or a target this process may not reach. Real for all
+		// anyone can tell.
+		return false, err
+	case !info.IsDir():
+		return false, fmt.Errorf("%s is not a directory", devicePath)
+	}
+	// The device directory can be reached, so the absence of a vendor file
+	// in it is a fact about the device and not about our access to it.
+	if _, err := os.Stat(filepath.Join(devicePath, "vendor")); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
 func openSysfs(root string) (*sysfsSource, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -68,19 +111,11 @@ func openSysfs(root string) (*sysfsSource, error) {
 			continue
 		}
 		devicePath := filepath.Join(root, name, "device")
-		// A card without a PCI vendor is virtual (simpledrm, vkms, a
-		// framebuffer) and holds no VRAM anyone arbitrates. Only absence
-		// means virtual: a vendor file that exists but cannot be reached,
-		// for example under a device directory this process may not
-		// traverse, belongs to a real card that must keep its index.
-		card := sysfsCard{num: num, devicePath: devicePath}
-		if _, err := os.Stat(filepath.Join(devicePath, "vendor")); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
-			}
-			card.vendorErr = err
+		virtual, vendorErr := classifyCard(devicePath)
+		if virtual {
+			continue
 		}
-		found = append(found, card)
+		found = append(found, sysfsCard{num: num, devicePath: devicePath, vendorErr: vendorErr})
 	}
 	if len(found) == 0 {
 		return nil, ErrNoDevices
