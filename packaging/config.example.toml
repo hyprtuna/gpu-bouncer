@@ -17,7 +17,7 @@ vram_floor_mib = 2048
 # watch "gpu-bouncer plan" for a while, then turn it on.
 reactive = false
 
-# How often the daemon samples VRAM and probes services.
+# How often the daemon samples VRAM and probes services. At least "1s".
 poll_interval = "5s"
 
 # The service assumed to want the GPU when nothing has explicitly asked.

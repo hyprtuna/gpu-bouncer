@@ -14,6 +14,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -116,7 +117,8 @@ type Policy struct {
 	DefaultWorkload string `toml:"default_workload"`
 	// Reactive enables acting without an explicit request.
 	Reactive bool `toml:"reactive"`
-	// PollInterval is how often the daemon samples VRAM and services.
+	// PollInterval is how often the daemon samples VRAM and services. A file
+	// may not set it below MinPollInterval: every poll probes every service.
 	PollInterval Duration `toml:"poll_interval"`
 	// GPUIndex selects which GPU to arbitrate. v0.1 arbitrates one GPU.
 	GPUIndex int `toml:"gpu_index"`
@@ -157,6 +159,100 @@ func Defaults() Config {
 
 // DefaultServiceTimeout bounds a service request when the config does not.
 const DefaultServiceTimeout = 5 * time.Second
+
+// MinPollInterval is the shortest poll_interval a config file may set. A poll
+// probes every configured service, so a millisecond interval is a flood, not
+// a setting.
+const MinPollInterval = time.Second
+
+// Bound is the legal range of one numeric config key. Every numeric field of
+// Policy and Service has exactly one entry in NumericBounds, which a test
+// enforces by reflection, so a key cannot be added without saying what its
+// legal values are. The check runs on the raw TOML value, before it reaches a
+// typed field: a negative number written into an unsigned field would
+// otherwise wrap to a huge positive one and be accepted.
+type Bound struct {
+	// Table is "policy" or "service"; Key is the TOML key.
+	Table, Key string
+	// Duration marks a key decoded from a duration string. Min is then in
+	// nanoseconds; otherwise it is in the key's own unit.
+	Duration bool
+	// Min is the smallest legal value, inclusive.
+	Min int64
+	// Signed marks a key that is negative by design and has no lower bound.
+	Signed bool
+}
+
+// NumericBounds lists the legal range of every numeric config key.
+var NumericBounds = []Bound{
+	{Table: "policy", Key: "vram_floor_mib", Min: 0},
+	{Table: "policy", Key: "min_effect_mib", Min: 0},
+	{Table: "policy", Key: "gpu_index", Min: 0},
+	{Table: "policy", Key: "poll_interval", Duration: true, Min: int64(MinPollInterval)},
+	{Table: "policy", Key: "action_cooldown", Duration: true, Min: 1},
+	{Table: "service", Key: "priority", Signed: true, Min: math.MinInt64},
+	{Table: "service", Key: "timeout", Duration: true, Min: 1},
+	{Table: "service", Key: "drain_timeout", Duration: true, Min: 1},
+}
+
+// checkBound validates one raw TOML value against its bound. label names the
+// table or service the key sits in, for the message.
+func checkBound(path, label string, b Bound, raw any) error {
+	if b.Signed {
+		return nil
+	}
+	// "policy.poll_interval" for the policy table, `service "x": timeout`
+	// for a service block, matching the other config errors.
+	name := label + ": " + b.Key
+	if label == "policy" {
+		name = "policy." + b.Key
+	}
+	if b.Duration {
+		text, ok := raw.(string)
+		if !ok {
+			return nil // the typed decode reports the type error
+		}
+		d, err := time.ParseDuration(text)
+		if err != nil {
+			return nil // likewise
+		}
+		switch {
+		case b.Min == 1 && d <= 0:
+			return fmt.Errorf("config %s: %s must be a positive duration, got %q", path, name, d)
+		case d < time.Duration(b.Min):
+			return fmt.Errorf("config %s: %s must be at least %s, got %q", path, name, time.Duration(b.Min), d)
+		}
+		return nil
+	}
+	n, ok := raw.(int64)
+	if !ok {
+		return nil // the typed decode reports the type error
+	}
+	if n < b.Min {
+		if b.Min == 0 {
+			return fmt.Errorf("config %s: %s must not be negative, got %d", path, name, n)
+		}
+		return fmt.Errorf("config %s: %s must be at least %d, got %d", path, name, b.Min, n)
+	}
+	return nil
+}
+
+// checkBounds validates every bounded key present in one raw table.
+func checkBounds(path, table, label string, raw map[string]any) error {
+	for _, b := range NumericBounds {
+		if b.Table != table {
+			continue
+		}
+		value, present := raw[b.Key]
+		if !present {
+			continue
+		}
+		if err := checkBound(path, label, b, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // DefaultDrainTimeout bounds a release's wait for the service to confirm the
 // unload when the config does not.
@@ -273,6 +369,24 @@ func mergeFile(cfg *Config, path string, data []byte) error {
 		return fmt.Errorf("config %s: unknown key(s): %s", path, strings.Join(slices.Compact(keys), ", "))
 	}
 
+	// Every numeric key is range checked on its raw value here, before the
+	// typed layer is merged, so that a negative number can neither wrap into
+	// an unsigned field nor be replaced by a default.
+	if rawPolicy, ok := raw["policy"].(map[string]any); ok {
+		if err := checkBounds(path, "policy", "policy", rawPolicy); err != nil {
+			return err
+		}
+	}
+	for i, block := range rawServices {
+		label := fmt.Sprintf("[[service]] #%d", i+1)
+		if i < len(layer.Services) && layer.Services[i].Name != "" {
+			label = fmt.Sprintf("service %q", layer.Services[i].Name)
+		}
+		if err := checkBounds(path, "service", label, block); err != nil {
+			return err
+		}
+	}
+
 	policyKeys := subKeys(raw, "policy")
 	if _, ok := policyKeys["vram_floor_mib"]; ok {
 		cfg.Policy.VRAMFloorMiB = layer.Policy.VRAMFloorMiB
@@ -284,9 +398,6 @@ func mergeFile(cfg *Config, path string, data []byte) error {
 		cfg.Policy.Reactive = layer.Policy.Reactive
 	}
 	if _, ok := policyKeys["poll_interval"]; ok {
-		if layer.Policy.PollInterval <= 0 {
-			return fmt.Errorf("config %s: policy.poll_interval must be a positive duration, got %q", path, layer.Policy.PollInterval.D())
-		}
 		cfg.Policy.PollInterval = layer.Policy.PollInterval
 	}
 	if _, ok := policyKeys["gpu_index"]; ok {
@@ -296,9 +407,6 @@ func mergeFile(cfg *Config, path string, data []byte) error {
 		cfg.Policy.MinEffectMiB = layer.Policy.MinEffectMiB
 	}
 	if _, ok := policyKeys["action_cooldown"]; ok {
-		if layer.Policy.ActionCooldown <= 0 {
-			return fmt.Errorf("config %s: policy.action_cooldown must be a positive duration, got %q", path, layer.Policy.ActionCooldown.D())
-		}
 		cfg.Policy.ActionCooldown = layer.Policy.ActionCooldown
 	}
 
@@ -311,17 +419,9 @@ func mergeFile(cfg *Config, path string, data []byte) error {
 			return fmt.Errorf("config %s: service %q defined twice in the same file", path, svc.Name)
 		}
 		inThisFile[svc.Name] = struct{}{}
-		var keys map[string]struct{}
+		var keys map[string]any
 		if i < len(rawServices) {
 			keys = rawServices[i]
-		}
-		// A duration a file sets explicitly must be positive. Silently
-		// replacing "0s" with the default would be exactly the kind of quiet
-		// change of behaviour that unknown keys are rejected to prevent.
-		for key, value := range map[string]Duration{"timeout": svc.Timeout, "drain_timeout": svc.DrainTimeout} {
-			if _, set := keys[key]; set && value <= 0 {
-				return fmt.Errorf("config %s: service %q: %s must be a positive duration, got %q", path, svc.Name, key, value.D())
-			}
 		}
 		if idx := indexOfService(cfg.Services, svc.Name); idx >= 0 {
 			mergeService(&cfg.Services[idx], svc, keys)
@@ -352,9 +452,9 @@ func subKeys(raw map[string]any, table string) map[string]struct{} {
 	return out
 }
 
-// serviceBlocks returns, per [[service]] block in file order, the set of keys
-// that block set explicitly.
-func serviceBlocks(raw map[string]any) []map[string]struct{} {
+// serviceBlocks returns, per [[service]] block in file order, the raw keys
+// and values that block set explicitly.
+func serviceBlocks(raw map[string]any) []map[string]any {
 	list, ok := raw["service"].([]map[string]any)
 	if !ok {
 		anyList, isAny := raw["service"].([]any)
@@ -369,20 +469,12 @@ func serviceBlocks(raw map[string]any) []map[string]struct{} {
 			list = append(list, m)
 		}
 	}
-	out := make([]map[string]struct{}, 0, len(list))
-	for _, block := range list {
-		keys := make(map[string]struct{}, len(block))
-		for k := range block {
-			keys[k] = struct{}{}
-		}
-		out = append(out, keys)
-	}
-	return out
+	return list
 }
 
 // mergeService overlays only the fields this block set explicitly, so a user
 // file can retune one key of a system defined service without restating it.
-func mergeService(dst *Service, src Service, keys map[string]struct{}) {
+func mergeService(dst *Service, src Service, keys map[string]any) {
 	set := func(key string) bool {
 		_, ok := keys[key]
 		return ok

@@ -190,7 +190,9 @@ $XDG_CONFIG_HOME/gpu-bouncer/config.toml     (defaults to ~/.config)
 
 `GPU_BOUNCER_CONFIG` overrides both with a single file. Unknown keys are an
 error rather than being ignored, because a misspelled policy key would silently
-change what the daemon is willing to do.
+change what the daemon is willing to do. So is a number outside its range: a
+negative `vram_floor_mib`, `min_effect_mib` or `gpu_index`, a duration of zero
+or less, or a `poll_interval` under `1s`. Only `priority` may be negative.
 
 ### `[policy]`
 
@@ -198,7 +200,7 @@ change what the daemon is willing to do.
 |---|---|---|
 | `vram_floor_mib` | `512` | Free VRAM to defend. Reactive mode engages below it. |
 | `reactive` | `false` | Act without being asked. |
-| `poll_interval` | `"5s"` | How often to sample VRAM and probe services. |
+| `poll_interval` | `"5s"` | How often to sample VRAM and probe services. At least `"1s"`: every poll probes every service. |
 | `default_workload` | unset | The service reactive mode defends. Unset means the highest priority service that is up. |
 | `gpu_index` | `0` | Which GPU to arbitrate. |
 | `min_effect_mib` | `64` | The smallest measured gain in free VRAM that counts as an action having worked. |
