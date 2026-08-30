@@ -13,55 +13,69 @@ them.
 ## The problem, and the fix
 
 Two Ollama services on one 8 GiB card. The transcript below is a real session
-on an RTX 4070 Laptop, not a mock up.
+on an RTX 4070 Laptop, not a mock up: two disposable Ollama servers on ports
+11500 and 11501 stand in for two services on the same card.
 
 ```console
-$ ollama ps                      # the coding model has the GPU
+# The coding model has the GPU.
+
+$ OLLAMA_HOST=127.0.0.1:11500 ollama ps
 NAME                                                     ID              SIZE      PROCESSOR    CONTEXT    UNTIL
 hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M    f218460127af    4.7 GB    100% GPU     4096       29 minutes from now
 
-$ ollama run qwen3.5-4b 'hello'  # a second service wants it too
+# A second service wants it too.
+
+$ OLLAMA_HOST=127.0.0.1:11501 ollama run hf.co/bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M "ok" >/dev/null 2>&1
+
+$ OLLAMA_HOST=127.0.0.1:11501 ollama ps
 NAME                                           ID              SIZE      PROCESSOR          CONTEXT    UNTIL
 hf.co/bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M    f946fe6d5e83    3.3 GB    41%/59% CPU/GPU    4096       29 minutes from now
 
-# 41%/59% CPU/GPU. It did not fail, it silently ran half on the CPU,
-# because the other service will not give the memory back.
+# It did not fail. It silently ran part of the model on the CPU, because
+# the other service will not give the memory back.
 
 $ gpu-bouncer status
-GPU 0  NVIDIA GeForce RTX 4070 Laptop GPU
+GPU 0  NVIDIA GeForce RTX 4070 Laptop GPU  (PCI 0000:01:00.0, vendor 0x10de)
   7079 MiB used of 8188 MiB, 1109 MiB free  (source: nvml)
 
 coder            ollama        priority 10   up
   version 0.33.2
   holding 4528 MiB
-  - hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M (4528 MiB) expires 2026-08-30T11:54:47+03:00
+  - hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M (4528 MiB) expires 2026-08-30T14:12:07+03:00
 
 assistant        ollama        priority 90   up
   version 0.33.2
   holding 1882 MiB
-  - hf.co/bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M (1882 MiB) 1282 MiB spilled to host RAM, expires 2026-08-30T11:54:59+03:00
+  - hf.co/bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M (1882 MiB) 1282 MiB spilled to host RAM, expires 2026-08-30T14:14:28+03:00
 
 A daemon is running.
+Config: /tmp/gbdemo/config.toml
 
 $ gpu-bouncer request assistant --need-mib 6144
 Done:
   release coder: acted, free VRAM 1109 MiB to 5794 MiB (+4685 MiB)
     unloaded hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M
 
-$ ollama run qwen3.5-4b 'hello'  # same command as before
+# Reload the same model on the same service.
+
+$ OLLAMA_HOST=127.0.0.1:11501 ollama stop hf.co/bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M >/dev/null 2>&1
+
+$ OLLAMA_HOST=127.0.0.1:11501 ollama run hf.co/bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M "ok" >/dev/null 2>&1
+
+$ OLLAMA_HOST=127.0.0.1:11501 ollama ps
 NAME                                           ID              SIZE      PROCESSOR    CONTEXT    UNTIL
 hf.co/bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M    f946fe6d5e83    3.1 GB    100% GPU     4096       29 minutes from now
 
-# 100% GPU.
+# Done. Drop the claim so the coder model can come back.
 
-$ gpu-bouncer release assistant  # done, let the coder model back in
+$ gpu-bouncer release assistant
 released the claim held by assistant
 ```
 
 The second load did not error. It silently ran 41% on the CPU, which is the
 part that makes this hard to notice: you just wonder why things got slow. After
-gpu-bouncer freed the coding model, the same command put the same model
-entirely on the GPU.
+gpu-bouncer freed the coding model, reloading the same model on the same
+service put it entirely on the GPU.
 
 `gpu-bouncer` never touched a process. It asked the coding service, over
 Ollama's own API, to expire what it was holding, and reported the GPU's own
