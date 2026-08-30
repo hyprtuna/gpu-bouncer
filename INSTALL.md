@@ -151,9 +151,9 @@ default: `vram_floor_mib = 512`, `reactive = false`, `poll_interval = "5s"`,
 `gpu_index = 0`, `min_effect_mib = 64`, `action_cooldown = "60s"`, and per
 service a `timeout` of `5s` and a `drain_timeout` of `30s`. A number outside
 its range is an error, not a request for the default: a duration of zero or
-less, a `poll_interval` under `1s`, or a negative `vram_floor_mib`,
-`min_effect_mib` or `gpu_index`. `priority` is the one key that may be
-negative.
+less, a `poll_interval` under `1s`, a `drain_timeout` over `10m`, or a
+negative `vram_floor_mib`, `min_effect_mib` or `gpu_index`. `priority` is the
+one key that may be negative.
 
 With `reactive = false`, which is the default, gpu-bouncer never acts on its
 own. It acts only when you run `gpu-bouncer request` or `gpu-bouncer evict`.
@@ -379,9 +379,19 @@ strings).
 `request` and `evict`: `ok`, `error` (only when an executed action failed:
 `N of M actions failed`), `message` (only on a dry run or a dry-run daemon),
 `plan` as above, `executed` (list of `service`, `verb`, `reason`, `acted`,
-`detail`, `error`, `free_before_mib`, `free_after_mib`), and on `request`
-only `target_met` (bool: the free VRAM measured after the last action is at
-or above the target).
+`detail`, `error`, `free_before_mib`, `free_after_mib`), `free_after_mib`
+(the GPU's free VRAM read once after every action had finished, or `null`
+when nothing ran or the reading failed), and on `request` only `target_met`
+(bool: that reading is at or above the target).
+
+A plan's actions run concurrently, one at a time per service, so a plan takes
+as long as its longest action rather than the sum of them. The per action
+`free_before_mib` and `free_after_mib` therefore describe overlapping
+windows; the top level `free_after_mib` is the one figure that measures the
+plan as a whole. The daemon sends the client the plan before it starts, and
+the client waits for the longest `timeout` plus `drain_timeout` in that plan,
+plus ten seconds. A daemon that accepts a request and then stops answering or
+closes the connection is reported as such, never as a missing daemon.
 
 `release`: `{"ok": true, "message": "..."}`. `version`: `{"version": "..."}`.
 

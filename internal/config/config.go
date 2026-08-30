@@ -187,6 +187,8 @@ type Bound struct {
 	Duration bool
 	// Min is the smallest legal value, inclusive.
 	Min int64
+	// Max is the largest legal value, inclusive. Zero means no upper bound.
+	Max int64
 	// Signed marks a key that is negative by design and has no lower bound.
 	Signed bool
 }
@@ -200,7 +202,7 @@ var NumericBounds = []Bound{
 	{Table: "policy", Key: "action_cooldown", Duration: true, Min: 1},
 	{Table: "service", Key: "priority", Signed: true, Min: math.MinInt64},
 	{Table: "service", Key: "timeout", Duration: true, Min: 1},
-	{Table: "service", Key: "drain_timeout", Duration: true, Min: 1},
+	{Table: "service", Key: "drain_timeout", Duration: true, Min: 1, Max: int64(MaxDrainTimeout)},
 }
 
 // checkBound validates one raw TOML value against its bound. label names the
@@ -229,6 +231,8 @@ func checkBound(path, label string, b Bound, raw any) error {
 			return fmt.Errorf("config %s: %s must be a positive duration, got %q", path, name, d)
 		case d < time.Duration(b.Min):
 			return fmt.Errorf("config %s: %s must be at least %s, got %q", path, name, time.Duration(b.Min), d)
+		case b.Max > 0 && d > time.Duration(b.Max):
+			return fmt.Errorf("config %s: %s must be at most %s, got %q", path, name, time.Duration(b.Max), d)
 		}
 		return nil
 	}
@@ -265,6 +269,13 @@ func checkBounds(path, table, label string, raw map[string]any) error {
 // DefaultDrainTimeout bounds a release's wait for the service to confirm the
 // unload when the config does not.
 const DefaultDrainTimeout = 30 * time.Second
+
+// MaxDrainTimeout is the longest drain_timeout a config file may set. A drain
+// is a client of gpu-bouncer waiting, and a daemon holding a control
+// connection open, for a service that has already been told to let go; past
+// ten minutes the service is not draining, it is stuck, and saying so beats
+// waiting longer.
+const MaxDrainTimeout = 10 * time.Minute
 
 const (
 	systemPath  = "/etc/gpu-bouncer/config.toml"

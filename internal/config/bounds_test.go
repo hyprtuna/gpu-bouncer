@@ -189,3 +189,38 @@ func TestNegativeUnsignedKeysAreRefused(t *testing.T) {
 		t.Errorf("poll_interval = 1ms: error = %v", err)
 	}
 }
+
+// drain_timeout is the one key with an upper bound. A drain is a client and a
+// control connection both waiting on a service that has already been told to
+// let go, so a config may not ask them to wait all day.
+func TestDrainTimeoutHasAnUpperBound(t *testing.T) {
+	head := "[[service]]\nname = \"x\"\nadapter = \"ollama\"\nendpoint = \"http://h:1\"\ndrain_timeout = "
+	t.Run("at the maximum", func(t *testing.T) {
+		cfg, err := LoadFrom([]string{writeFile(t, t.TempDir(), "c.toml", head+`"10m"`+"\n")})
+		if err != nil {
+			t.Fatalf("10m rejected: %v", err)
+		}
+		if got := cfg.Services[0].DrainTimeout.D(); got != MaxDrainTimeout {
+			t.Errorf("drain_timeout = %s, want %s", got, MaxDrainTimeout)
+		}
+	})
+	for _, value := range []string{`"10m1s"`, `"11m"`, `"24h"`, `"2562047h47m16.854775807s"`} {
+		t.Run(value, func(t *testing.T) {
+			_, err := LoadFrom([]string{writeFile(t, t.TempDir(), "c.toml", head+value+"\n")})
+			if err == nil {
+				t.Fatalf("drain_timeout = %s accepted, want a refusal", value)
+			}
+			for _, want := range []string{`service "x": drain_timeout must be at most 10m0s`, "c.toml"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+	// No other key gains an upper bound by accident.
+	for _, b := range NumericBounds {
+		if b.Max != 0 && b.Key != "drain_timeout" {
+			t.Errorf("%s.%s has an upper bound of %d, which is undocumented", b.Table, b.Key, b.Max)
+		}
+	}
+}

@@ -90,6 +90,7 @@ func (d *Daemon) Run(ctx context.Context, socketPath string) error {
 	if err != nil {
 		return err
 	}
+	listener.SetBudget(d.connBudget())
 	defer func() { _ = listener.Close() }()
 
 	d.log.Info("gpu-bouncer daemon started",
@@ -341,12 +342,86 @@ func (d *Daemon) snapshotClaims() []scheduler.Claim {
 // execute carries out a plan on behalf of a client and reports what actually
 // happened, with the GPU's own free VRAM figure measured either side of each
 // action. The client waits for its own actions; the poll loop does not.
+//
+// The actions run concurrently, one at a time per service, because each is
+// mostly a wait on a service that has been told to let go. Run one after
+// another, four services that each take their full drain_timeout would keep
+// a client waiting four drains for work that takes one, and `evict
+// --all-except` exists precisely to name several services at once.
 func (d *Daemon) execute(ctx context.Context, plan scheduler.Plan) []ipc.ActionResult {
-	results := make([]ipc.ActionResult, 0, len(plan.Actions))
-	for _, action := range plan.Actions {
-		results = append(results, d.executeGuarded(ctx, action))
+	results := make([]ipc.ActionResult, len(plan.Actions))
+	var wg sync.WaitGroup
+	for i, action := range plan.Actions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = d.executeGuarded(ctx, action)
+		}()
 	}
+	wg.Wait()
 	return results
+}
+
+// longestAction is the longest a single action in plan may take under this
+// config: the service's request timeout plus the drain it may then wait out.
+// The actions run concurrently, so it bounds the plan as a whole, and it is
+// what a client is told to wait for.
+func (d *Daemon) longestAction(plan scheduler.Plan) time.Duration {
+	var longest time.Duration
+	for _, action := range plan.Actions {
+		svc, ok := d.cfg.Service(action.Service)
+		if !ok {
+			continue
+		}
+		if bound := svc.Timeout.D() + svc.DrainTimeout.D(); bound > longest {
+			longest = bound
+		}
+	}
+	return longest
+}
+
+// connBudget bounds one control connection: the longest plan this config can
+// produce, plus the slack the client allows itself, plus room for the probes
+// the daemon makes either side of it. A daemon that cut a client off while
+// that client was still legitimately waiting would report a failure for work
+// that succeeded.
+func (d *Daemon) connBudget() time.Duration {
+	var longest time.Duration
+	for _, svc := range d.cfg.Services {
+		if bound := svc.Timeout.D() + svc.DrainTimeout.D(); bound > longest {
+			longest = bound
+		}
+	}
+	return ipc.WaitFor(longest) + time.Minute
+}
+
+// announce tells a client what is about to happen, before it happens. The
+// client sizes its own wait from the reply, so a plan that will take ten
+// minutes is waited out and a daemon that has gone quiet is not.
+func (d *Daemon) announce(req ipc.Request, send func(ipc.Response), plan scheduler.Plan) {
+	if send == nil || !req.PlanFirst || len(plan.Actions) == 0 {
+		return
+	}
+	announced := plan
+	send(ipc.Response{OK: true, Plan: &announced, LongestActionMS: d.longestAction(plan).Milliseconds()})
+}
+
+// freeAfter reads the GPU once, after every action in a plan has finished.
+// The per action figures are taken as each action starts and ends and the
+// actions overlap, so this is the one reading that measures the plan whole.
+// A failed reading is reported as no figure rather than as zero.
+func (d *Daemon) freeAfter(ctx context.Context, executed []ipc.ActionResult) *uint64 {
+	if len(executed) == 0 {
+		return nil
+	}
+	after, err := d.observer.Device(ctx)
+	if err != nil {
+		d.log.Warn("the GPU could not be read after the plan finished, so its overall effect is unknown",
+			"error", err)
+		return nil
+	}
+	free := after.FreeMiB()
+	return &free
 }
 
 func (d *Daemon) executeOne(ctx context.Context, action scheduler.Action) ipc.ActionResult {
@@ -435,8 +510,9 @@ func (d *Daemon) logAction(r ipc.ActionResult) {
 	d.log.Info("action", attrs...)
 }
 
-// handle answers one control socket request.
-func (d *Daemon) handle(ctx context.Context, req ipc.Request) ipc.Response {
+// handle answers one control socket request. send delivers a preliminary
+// reply, which the handlers that carry out a plan use to announce it.
+func (d *Daemon) handle(ctx context.Context, req ipc.Request, send func(ipc.Response)) ipc.Response {
 	switch req.Op {
 	case ipc.OpPing:
 		dry := d.dryRun
@@ -446,11 +522,11 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request) ipc.Response {
 	case ipc.OpPlan:
 		return d.handlePlan(ctx)
 	case ipc.OpRequest:
-		return d.handleRequest(ctx, req)
+		return d.handleRequest(ctx, req, send)
 	case ipc.OpRelease:
 		return d.handleReleaseClaim(req)
 	case ipc.OpEvict:
-		return d.handleEvict(ctx, req)
+		return d.handleEvict(ctx, req, send)
 	default:
 		return ipc.Response{Error: fmt.Sprintf("unknown operation %q", req.Op)}
 	}
@@ -522,7 +598,7 @@ func (d *Daemon) handlePlan(ctx context.Context) ipc.Response {
 
 // handleRequest records a claim and acts on it immediately, so that a client
 // that asked for room does not have to wait for the next poll.
-func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request) ipc.Response {
+func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request, send func(ipc.Response)) ipc.Response {
 	if req.Service == "" {
 		return ipc.Response{Error: "request needs a service name"}
 	}
@@ -573,12 +649,16 @@ func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request) ipc.Respons
 		return resp
 	}
 	resp.Message = updated
+	d.announce(req, send, plan)
 	resp.Executed = d.execute(ctx, plan)
-	// Whether the room asked for is there now is measured, not planned:
-	// the free figure after the last action, or the one the plan saw when
-	// there was nothing to do.
+	resp.FreeAfterMiB = d.freeAfter(ctx, resp.Executed)
+	// Whether the room asked for is there now is measured, not planned: the
+	// reading taken once every action had finished, or the one the plan saw
+	// when there was nothing to do.
 	free := plan.CurrentFreeMiB
-	if n := len(resp.Executed); n > 0 {
+	if resp.FreeAfterMiB != nil {
+		free = *resp.FreeAfterMiB
+	} else if n := len(resp.Executed); n > 0 {
 		free = resp.Executed[n-1].FreeAfterMiB
 	}
 	met := free >= plan.TargetFreeMiB
@@ -618,7 +698,7 @@ func (d *Daemon) handleReleaseClaim(req ipc.Request) ipc.Response {
 	return ipc.Response{OK: true, Message: fmt.Sprintf("released the claim held by %s", req.Service)}
 }
 
-func (d *Daemon) handleEvict(ctx context.Context, req ipc.Request) ipc.Response {
+func (d *Daemon) handleEvict(ctx context.Context, req ipc.Request, send func(ipc.Response)) ipc.Response {
 	if req.Service == "" {
 		return ipc.Response{Error: "evict needs a service name"}
 	}
@@ -642,6 +722,8 @@ func (d *Daemon) handleEvict(ctx context.Context, req ipc.Request) ipc.Response 
 		resp.Message = "dry run, nothing was done"
 		return resp
 	}
+	d.announce(req, send, plan)
 	resp.Executed = d.execute(ctx, plan)
+	resp.FreeAfterMiB = d.freeAfter(ctx, resp.Executed)
 	return resp
 }

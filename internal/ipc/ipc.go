@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -57,6 +58,12 @@ type Request struct {
 	AllExcept bool `json:"all_except,omitempty"`
 	// DryRun asks the daemon to plan and report without acting.
 	DryRun bool `json:"dry_run,omitempty"`
+	// PlanFirst asks the daemon to send the plan it is about to carry out as
+	// a preliminary reply, before the results. The client needs it to know
+	// how long the work it is waiting for may take: only the daemon holds
+	// the timeouts those actions run under. A daemon too old to know the
+	// field answers once, which is still correct, just less well bounded.
+	PlanFirst bool `json:"plan_first,omitempty"`
 }
 
 // ActionResult is what actually happened to one service, with the measured
@@ -119,6 +126,16 @@ type Response struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 
+	// Preliminary marks the first of two replies on one connection: the plan
+	// the daemon is about to carry out. The results follow in a second reply
+	// on the same connection. Only a client that set Request.PlanFirst is
+	// ever sent one.
+	Preliminary bool `json:"preliminary,omitempty"`
+	// LongestActionMS is set on a preliminary reply: the longest a single
+	// action in Plan may take under the daemon's own config. Actions on
+	// different services run concurrently, so it bounds the whole plan.
+	LongestActionMS int64 `json:"longest_action_ms,omitempty"`
+
 	// GPU is the arbitrated device. Devices is every device the source sees,
 	// so that a wrong gpu_index can be diagnosed from the output alone.
 	GPU      *GPUReport      `json:"gpu,omitempty"`
@@ -128,10 +145,16 @@ type Response struct {
 	Executed []ActionResult  `json:"executed,omitempty"`
 	// TargetMet is set on a request reply: whether the free VRAM measured
 	// after the last action is at or above the target the request set.
-	TargetMet *bool            `json:"target_met,omitempty"`
-	Claims    []ClaimReport    `json:"claims,omitempty"`
-	Cooldowns []CooldownReport `json:"cooldowns,omitempty"`
-	Message   string           `json:"message,omitempty"`
+	TargetMet *bool `json:"target_met,omitempty"`
+	// FreeAfterMiB is the GPU's free VRAM read once after every action in
+	// Executed had finished. The per action figures are taken as each action
+	// starts and ends and the actions overlap, so this is the one figure
+	// that measures what the plan as a whole achieved. It is absent when
+	// nothing ran or the reading failed.
+	FreeAfterMiB *uint64          `json:"free_after_mib,omitempty"`
+	Claims       []ClaimReport    `json:"claims,omitempty"`
+	Cooldowns    []CooldownReport `json:"cooldowns,omitempty"`
+	Message      string           `json:"message,omitempty"`
 
 	// DaemonConfig is set by the daemon on ping and status replies: which
 	// files it loaded, their digest, and when. ConfigStale is set by the
@@ -227,13 +250,46 @@ func SearchPaths() []string {
 // ErrNoDaemon means nothing was listening on any candidate socket.
 var ErrNoDaemon = errors.New("no gpu-bouncer daemon is listening")
 
-// Do sends one request to the first daemon that answers and returns its reply.
-func Do(ctx context.Context, req Request) (Response, error) {
+const (
+	// ClientSlack is how much longer than the work itself a client waits for
+	// the results: enough for the exchange and the GPU readings either side
+	// of the plan, and not so much that a wedged daemon holds a terminal
+	// long past the point of hope.
+	ClientSlack = 10 * time.Second
+
+	// PlanWait bounds getting an answer that carries no plan of its own: the
+	// daemon probes every configured service before it can reply. It is also
+	// the whole wait against a daemon too old to announce its plan.
+	PlanWait = 90 * time.Second
+)
+
+// WaitFor returns how long a client waits for the results of a plan whose
+// longest single action may take longest. Actions on different services run
+// concurrently, so a plan's wall time is its longest action and not the sum
+// of them; a daemon that reported nothing gets the flat PlanWait.
+func WaitFor(longest time.Duration) time.Duration {
+	if longest <= 0 {
+		return PlanWait
+	}
+	return longest + ClientSlack
+}
+
+// Exchange sends one request to the first daemon that answers and returns its
+// final reply. A daemon that announces its plan first is waited on for as
+// long as that plan can legitimately take.
+func Exchange(ctx context.Context, req Request) (Response, error) {
 	var lastErr error
 	for _, path := range SearchPaths() {
-		resp, err := doAt(ctx, path, req)
+		resp, connected, err := doAt(ctx, path, req)
 		if err == nil {
 			return resp, nil
+		}
+		if connected {
+			// Something accepted this connection, so a daemon exists.
+			// Folding that into "no daemon is listening" would send an
+			// operator to start a second one while the first is still
+			// carrying out the plan it was just given.
+			return Response{}, err
 		}
 		lastErr = err
 	}
@@ -243,32 +299,62 @@ func Do(ctx context.Context, req Request) (Response, error) {
 	return Response{}, fmt.Errorf("%w (tried %v): %v", ErrNoDaemon, SearchPaths(), lastErr)
 }
 
-func doAt(ctx context.Context, path string, req Request) (Response, error) {
+// Do sends one request that carries no plan, which is every read only
+// command, and returns the reply.
+func Do(ctx context.Context, req Request) (Response, error) {
+	req.PlanFirst = false
+	return Exchange(ctx, req)
+}
+
+// doAt runs one exchange against one socket. The bool reports whether the
+// socket accepted the connection, which decides whether a failure means "no
+// daemon" or "this daemon".
+func doAt(ctx context.Context, path string, req Request) (Response, bool, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "unix", path)
 	if err != nil {
-		return Response{}, err
+		return Response{}, false, err
 	}
 	defer func() { _ = conn.Close() }()
 
+	wait := PlanWait
 	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	} else {
-		_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+		wait = time.Until(deadline)
 	}
+	_ = conn.SetDeadline(time.Now().Add(wait))
 
 	encoded, err := json.Marshal(req)
 	if err != nil {
-		return Response{}, fmt.Errorf("encode request: %w", err)
+		return Response{}, false, fmt.Errorf("encode request: %w", err)
 	}
 	if _, err := conn.Write(append(encoded, '\n')); err != nil {
-		return Response{}, fmt.Errorf("send request: %w", err)
+		return Response{}, true, connectionError(err, wait)
 	}
 
 	reader := bufio.NewReaderSize(conn, 64*1024)
+	resp, err := readResponse(reader, wait)
+	if err != nil {
+		return Response{}, true, err
+	}
+	if !resp.Preliminary {
+		return resp, true, nil
+	}
+
+	// The daemon has said what it is about to do. Wait for the results for
+	// as long as that work can take under its config, and no longer.
+	wait = WaitFor(time.Duration(resp.LongestActionMS) * time.Millisecond)
+	_ = conn.SetDeadline(time.Now().Add(wait))
+	final, err := readResponse(reader, wait)
+	if err != nil {
+		return Response{}, true, err
+	}
+	return final, true, nil
+}
+
+func readResponse(reader *bufio.Reader, wait time.Duration) (Response, error) {
 	line, err := readLine(reader, maxRequest)
 	if err != nil {
-		return Response{}, fmt.Errorf("read response: %w", err)
+		return Response{}, connectionError(err, wait)
 	}
 	var resp Response
 	if err := json.Unmarshal(line, &resp); err != nil {
@@ -277,13 +363,47 @@ func doAt(ctx context.Context, path string, req Request) (Response, error) {
 	return resp, nil
 }
 
-// Handler answers one request.
-type Handler func(ctx context.Context, req Request) Response
+// connectionError describes a failure on a socket a daemon already accepted.
+// The daemon exists, so the message must never suggest starting one: the two
+// cases an operator meets are a daemon still working past the wait and a
+// daemon that went away in the middle of answering.
+func connectionError(err error, wait time.Duration) error {
+	switch {
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		return fmt.Errorf("the daemon accepted the request but did not answer within %s",
+			wait.Round(time.Second))
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
+		errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE):
+		return errors.New("the daemon closed the connection")
+	default:
+		return fmt.Errorf("read response: %w", err)
+	}
+}
+
+// Handler answers one request. It may call send with a preliminary reply
+// before returning its final one, which is how a daemon tells a client what
+// it is about to do before it takes the time to do it. Only a handler knows
+// whether the client asked for that, so only a handler decides.
+type Handler func(ctx context.Context, req Request, send func(Response)) Response
+
+// defaultBudget bounds a connection whose listener was given no budget.
+const defaultBudget = 2 * time.Minute
 
 // Listener owns a Unix socket and serves requests until its context ends.
 type Listener struct {
 	path     string
 	listener net.Listener
+	budget   time.Duration
+}
+
+// SetBudget bounds how long one connection may take from the request arriving
+// to the answer being written. The daemon sets it from its own config: a plan
+// whose longest action is a ten minute drain must not have its answer cut off
+// at the default, which is the same mistake as a client giving up too early.
+func (l *Listener) SetBudget(d time.Duration) {
+	if d > 0 {
+		l.budget = d
+	}
 }
 
 // afterBind, when set by a test, observes the socket between bind and chmod,
@@ -379,13 +499,16 @@ func (l *Listener) Serve(ctx context.Context, handle Handler) error {
 			}
 			return fmt.Errorf("accept: %w", err)
 		}
-		go serveConn(ctx, conn, handle)
+		go serveConn(ctx, conn, l.budget, handle)
 	}
 }
 
-func serveConn(ctx context.Context, conn net.Conn, handle Handler) {
+func serveConn(ctx context.Context, conn net.Conn, budget time.Duration, handle Handler) {
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
+	if budget <= 0 {
+		budget = defaultBudget
+	}
+	_ = conn.SetDeadline(time.Now().Add(budget))
 
 	reader := bufio.NewReaderSize(conn, 64*1024)
 	line, err := readLine(reader, maxRequest)
@@ -398,7 +521,13 @@ func serveConn(ctx context.Context, conn net.Conn, handle Handler) {
 		writeResponse(conn, Response{Error: "decode request: " + err.Error()})
 		return
 	}
-	writeResponse(conn, handle(ctx, req))
+	// The flag is set here rather than by the handler so that a preliminary
+	// reply can never be mistaken for a final one.
+	send := func(resp Response) {
+		resp.Preliminary = true
+		writeResponse(conn, resp)
+	}
+	writeResponse(conn, handle(ctx, req, send))
 }
 
 func writeResponse(conn net.Conn, resp Response) {
