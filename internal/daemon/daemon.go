@@ -44,6 +44,10 @@ type Daemon struct {
 	// Reactive plans skip them until the recorded time; explicit request and
 	// evict do not consult them. Like claims, they live only in memory.
 	cooldowns map[string]cooldown
+	// inflight names the services an action is running on right now. At most
+	// one action per service is ever in flight, and a plan never names a
+	// service that is in it.
+	inflight map[string]struct{}
 }
 
 type cooldown struct {
@@ -68,6 +72,7 @@ func New(cfg config.Config, source gpu.Source, log *slog.Logger, dryRun bool) (*
 		now:       time.Now,
 		claims:    make(map[string]scheduler.Claim),
 		cooldowns: make(map[string]cooldown),
+		inflight:  make(map[string]struct{}),
 	}, nil
 }
 
@@ -127,6 +132,10 @@ func (d *Daemon) Run(ctx context.Context, socketPath string) error {
 // cooldowns: an action the loop already tried and measured as useless is not
 // tried again every poll, which for a llama-swap release would mean killing
 // in flight requests once per poll_interval forever.
+//
+// The loop never waits for an action. Each one runs on its own goroutine,
+// one per service at a time, so an Ollama drain on one service does not
+// stop the next poll from observing every other service and acting on it.
 func (d *Daemon) tick(ctx context.Context) {
 	obs := d.observation(ctx)
 	d.applyCooldowns(&obs)
@@ -141,14 +150,66 @@ func (d *Daemon) tick(ctx context.Context) {
 		"target_mib", plan.TargetFreeMiB,
 		"actions", len(plan.Actions),
 	)
-	d.execute(ctx, plan)
+	for _, action := range plan.Actions {
+		go d.executeGuarded(ctx, action)
+	}
 }
 
-// observation reads the world and attaches the current claims.
+// observation reads the world and attaches the current claims and the
+// services an action is still running on.
 func (d *Daemon) observation(ctx context.Context) scheduler.Observation {
 	obs := d.observer.Observe(ctx)
 	obs.Claims = d.snapshotClaims()
+	d.applyInflight(&obs)
 	return obs
+}
+
+// applyInflight marks the services an action is running on.
+func (d *Daemon) applyInflight(obs *scheduler.Observation) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := range obs.Services {
+		if _, busy := d.inflight[obs.Services[i].Name]; busy {
+			obs.Services[i].ActionInFlight = true
+		}
+	}
+}
+
+// acquire claims the one action slot a service has. It reports false when an
+// action is already in flight on it.
+func (d *Daemon) acquire(service string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, busy := d.inflight[service]; busy {
+		return false
+	}
+	d.inflight[service] = struct{}{}
+	return true
+}
+
+func (d *Daemon) releaseSlot(service string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.inflight, service)
+}
+
+// executeGuarded runs one action under the service's slot. A plan built from
+// an observation that predates another action's start can still name the
+// same service; the slot closes that window, and the skip is reported in
+// the result rather than acted on twice.
+func (d *Daemon) executeGuarded(ctx context.Context, action scheduler.Action) ipc.ActionResult {
+	if !d.acquire(action.Service) {
+		result := ipc.ActionResult{
+			Service: action.Service,
+			Verb:    string(action.Verb),
+			Reason:  action.Reason,
+			Detail:  "skipped, an action on it is already in flight",
+		}
+		d.log.Info("action skipped, one is already in flight", "service", action.Service, "verb", action.Verb)
+		return result
+	}
+	defer d.releaseSlot(action.Service)
+	return d.executeOne(ctx, action)
 }
 
 // applyCooldowns marks cooling services on an observation and forgets the
@@ -224,12 +285,13 @@ func (d *Daemon) snapshotClaims() []scheduler.Claim {
 	return out
 }
 
-// execute carries out a plan and reports what actually happened, with the
-// GPU's own free VRAM figure measured either side of each action.
+// execute carries out a plan on behalf of a client and reports what actually
+// happened, with the GPU's own free VRAM figure measured either side of each
+// action. The client waits for its own actions; the poll loop does not.
 func (d *Daemon) execute(ctx context.Context, plan scheduler.Plan) []ipc.ActionResult {
 	results := make([]ipc.ActionResult, 0, len(plan.Actions))
 	for _, action := range plan.Actions {
-		results = append(results, d.executeOne(ctx, action))
+		results = append(results, d.executeGuarded(ctx, action))
 	}
 	return results
 }
@@ -423,6 +485,7 @@ func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request) ipc.Respons
 	} else {
 		obs.Claims = d.snapshotClaims()
 	}
+	d.applyInflight(&obs)
 
 	plan := scheduler.Decide(d.cfg, obs)
 	resp := ipc.Response{OK: true, Plan: &plan}

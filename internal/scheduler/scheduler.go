@@ -81,6 +81,11 @@ type ServiceState struct {
 	// on the observations it builds for its own poll loop, so an explicit
 	// request or evict never sees it.
 	CooldownUntil time.Time
+
+	// ActionInFlight marks a service the daemon is still acting on. No plan
+	// names it again until that action has finished: one action per service
+	// at a time, and never a second release racing the first one's drain.
+	ActionInFlight bool
 }
 
 // Claim is an outstanding explicit request for the GPU.
@@ -330,6 +335,9 @@ func evictionCandidates(services []ServiceState, beneficiary ServiceState) (cand
 			notes = append(notes, fmt.Sprintf("%s left alone, cooling down until %s after an action on it freed nothing",
 				s.Name, s.CooldownUntil.Format(time.RFC3339)))
 			continue
+		case s.ActionInFlight:
+			notes = append(notes, fmt.Sprintf("%s left alone, an action on it is still in flight", s.Name))
+			continue
 		}
 		candidates = append(candidates, s)
 	}
@@ -418,6 +426,10 @@ func Evict(obs Observation, names []string) Plan {
 		}
 		if !svc.Up {
 			plan.Notes = append(plan.Notes, fmt.Sprintf("%s skipped, it is not running", name))
+			continue
+		}
+		if svc.ActionInFlight {
+			plan.Notes = append(plan.Notes, fmt.Sprintf("%s skipped, an action on it is still in flight", name))
 			continue
 		}
 		verb, reason, ok := chooseVerb(svc)

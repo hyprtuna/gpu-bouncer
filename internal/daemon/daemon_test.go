@@ -70,7 +70,37 @@ type fakeOllamaServer struct {
 	flap       bool
 	emptyReads atomic.Int32
 	unloadHit  atomic.Int32
+	psHits     atomic.Int32
 	onUnload   func()
+
+	// log records every request with its time, so a test can prove what
+	// happened while something else was in flight.
+	logMu sync.Mutex
+	log   []requestRecord
+}
+
+type requestRecord struct {
+	at   time.Time
+	path string
+}
+
+func (f *fakeOllamaServer) record(path string) {
+	f.logMu.Lock()
+	defer f.logMu.Unlock()
+	f.log = append(f.log, requestRecord{at: time.Now(), path: path})
+}
+
+// requests returns the recorded requests to one path, in order.
+func (f *fakeOllamaServer) requests(path string) []requestRecord {
+	f.logMu.Lock()
+	defer f.logMu.Unlock()
+	var out []requestRecord
+	for _, r := range f.log {
+		if r.path == path {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func (f *fakeOllamaServer) start(t *testing.T) string {
@@ -80,6 +110,8 @@ func (f *fakeOllamaServer) start(t *testing.T) string {
 		_, _ = io.WriteString(w, `{"version":"0.33.2"}`)
 	})
 	mux.HandleFunc("/api/ps", func(w http.ResponseWriter, r *http.Request) {
+		f.psHits.Add(1)
+		f.record("/api/ps")
 		if f.flap && f.emptyReads.Load() > 0 {
 			f.emptyReads.Add(-1)
 			_, _ = io.WriteString(w, `{"models":[]}`)
@@ -94,6 +126,7 @@ func (f *fakeOllamaServer) start(t *testing.T) string {
 	})
 	mux.HandleFunc("/api/generate", func(w http.ResponseWriter, r *http.Request) {
 		f.unloadHit.Add(1)
+		f.record("/api/generate")
 		switch {
 		case f.flap:
 			f.emptyReads.Store(1)
@@ -863,5 +896,156 @@ func TestNormalDaemonReportsDryRunFalse(t *testing.T) {
 	ping := call(t, ipc.Request{Op: ipc.OpPing})
 	if ping.DaemonDryRun == nil || *ping.DaemonDryRun {
 		t.Errorf("daemon_dry_run = %v, want false", ping.DaemonDryRun)
+	}
+}
+
+// drainSetup is a reactive daemon over two eviction candidates: slow, whose
+// model never leaves /api/ps so every release drains for drainTimeout, and
+// quick, which unloads at once. The defender top holds nothing. The floor is
+// unreachable, so every poll wants both released.
+func drainSetup(t *testing.T, drainTimeout time.Duration) (slow, quick *fakeOllamaServer) {
+	t.Helper()
+	slow = &fakeOllamaServer{sticky: true}
+	slow.loaded.Store(true)
+	quick = &fakeOllamaServer{flap: true}
+	quick.loaded.Store(true)
+	topURL := (&fakeOllamaServer{}).start(t)
+	cfg := config.Config{
+		Policy: config.Policy{
+			VRAMFloorMiB:   100000,
+			Reactive:       true,
+			PollInterval:   config.Duration(20 * time.Millisecond),
+			MinEffectMiB:   64,
+			ActionCooldown: config.Duration(time.Hour),
+		},
+		Services: []config.Service{
+			{Name: "top", Adapter: config.AdapterOllama, Endpoint: topURL, Priority: 90},
+			{Name: "slow", Adapter: config.AdapterOllama, Endpoint: slow.start(t), Priority: 10,
+				DrainTimeout: config.Duration(drainTimeout)},
+			{Name: "quick", Adapter: config.AdapterOllama, Endpoint: quick.start(t), Priority: 20,
+				DrainTimeout: config.Duration(drainTimeout)},
+		},
+	}
+	hardware := &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 5200}}
+	testDaemon(t, cfg, hardware, false)
+	return slow, quick
+}
+
+// Invariant: the poll loop never blocks on an action. While slow is draining
+// for five seconds, quick is still probed at every poll and still released.
+func TestDrainDoesNotBlockTheLoop(t *testing.T) {
+	slow, quick := drainSetup(t, 5*time.Second)
+
+	if !unloadsWithin(slow, 1, 3*time.Second) {
+		t.Fatal("slow was never released")
+	}
+	drainStart := slow.requests("/api/generate")[0].at
+	// slow is now draining. For the next two seconds, well inside its five
+	// second drain, the loop must keep observing quick and act on it.
+	probesBefore := quick.psHits.Load()
+	if !unloadsWithin(quick, 1, 2*time.Second) {
+		t.Fatal("quick was not released while slow was draining")
+	}
+	quickRelease := quick.requests("/api/generate")[0].at
+	if quickRelease.Sub(drainStart) > 4*time.Second {
+		t.Errorf("quick was released %s after slow's drain began, which is after the drain, not during it", quickRelease.Sub(drainStart))
+	}
+	time.Sleep(time.Second)
+	if n := quick.psHits.Load() - probesBefore; n < 20 {
+		t.Errorf("quick was probed %d times in about three seconds of a slow drain, want at least 20 (one per poll)", n)
+	}
+	// slow's drain must still be in flight at this point, which is the whole
+	// point: its second release, if any, may only start after the first ends.
+	if n := len(slow.requests("/api/generate")); n != 1 {
+		t.Errorf("slow received %d releases while its first was still draining, want 1", n)
+	}
+}
+
+// Invariant: at most one action in flight per service. Two explicit evicts
+// of a draining service at once produce one release; the second is reported
+// as skipped rather than run alongside the first.
+func TestOneActionInFlightPerService(t *testing.T) {
+	slow, _ := drainSetup(t, 2*time.Second)
+	if !unloadsWithin(slow, 1, 3*time.Second) {
+		t.Fatal("slow was never released")
+	}
+	// The loop's release is draining. Explicit evicts must queue behind it,
+	// not run beside it.
+	results := make(chan ipc.Response, 2)
+	for i := 0; i < 2; i++ {
+		go func() { results <- call(t, ipc.Request{Op: ipc.OpEvict, Service: "slow"}) }()
+	}
+	skipped := 0
+	for i := 0; i < 2; i++ {
+		resp := <-results
+		for _, r := range resp.Executed {
+			if strings.Contains(r.Detail, "already in flight") {
+				skipped++
+			}
+		}
+		for _, n := range resp.Plan.Notes {
+			if strings.Contains(n, "still in flight") {
+				skipped++
+			}
+		}
+	}
+	if skipped != 2 {
+		t.Errorf("%d of 2 concurrent evicts were skipped, want both while the loop's release drains", skipped)
+	}
+	gens := slow.requests("/api/generate")
+	for i := 1; i < len(gens); i++ {
+		if gens[i].at.Sub(gens[i-1].at) < 2*time.Second {
+			t.Errorf("two releases of slow %s apart, want at least the 2s drain between them", gens[i].at.Sub(gens[i-1].at))
+		}
+	}
+	if len(gens) != 1 {
+		t.Errorf("slow received %d releases, want exactly the loop's one", len(gens))
+	}
+}
+
+// Invariant: shutdown during a drain does not wait for it.
+func TestShutdownDuringDrainIsPrompt(t *testing.T) {
+	slow := &fakeOllamaServer{sticky: true}
+	slow.loaded.Store(true)
+	cfg := config.Config{
+		Policy: config.Policy{VRAMFloorMiB: 512, PollInterval: config.Duration(time.Hour)},
+		Services: []config.Service{
+			{Name: "top", Adapter: config.AdapterOllama, Endpoint: (&fakeOllamaServer{}).start(t), Priority: 90},
+			{Name: "slow", Adapter: config.AdapterOllama, Endpoint: slow.start(t), Priority: 10,
+				DrainTimeout: config.Duration(30 * time.Second)},
+		},
+	}
+	d := newTestDaemon(t, cfg, &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 5200}}, false)
+	socket := filepath.Join(t.TempDir(), "gpu-bouncer.sock")
+	t.Setenv(ipc.EnvSocket, socket)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Run(ctx, socket) }()
+	waitForDaemon(t, socket)
+
+	go func() {
+		evictCtx, evictCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer evictCancel()
+		_, _ = ipc.Do(evictCtx, ipc.Request{Op: ipc.OpEvict, Service: "slow"})
+	}()
+	if !unloadsWithin(slow, 1, 3*time.Second) {
+		t.Fatal("slow was never released")
+	}
+
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run returned %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s of cancellation during a drain")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("shutdown took %s during a 30s drain, want under the 1s service timeout", elapsed)
+	}
+	if _, err := os.Stat(socket); !os.IsNotExist(err) {
+		t.Errorf("socket still exists after shutdown: %v", err)
 	}
 }
