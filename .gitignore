@@ -3,9 +3,3 @@
 /dist/
 *.test
 *.out
-
-# Local tooling and agent scaffolding, never part of the product
-/.aegis/
-/.claude/
-/CLAUDE.md
-/AGENTS.md
