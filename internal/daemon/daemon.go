@@ -494,11 +494,22 @@ func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request) ipc.Respons
 	// still the one the real request would produce.
 	dryRun := req.DryRun || d.dryRun
 	claim := scheduler.Claim{Service: req.Service, NeedMiB: req.NeedMiB, At: time.Now()}
+	// A second request for the same service updates how much it wants and
+	// keeps the time it first asked: equal priority claims are settled by
+	// who asked first, and asking again must not send a claim to the back
+	// of that line.
+	var updated string
+	d.mu.Lock()
+	if existing, had := d.claims[req.Service]; had {
+		claim.At = existing.At
+		updated = fmt.Sprintf("updated the claim held since %s", existing.At.Format(time.RFC3339))
+	}
 	if !dryRun {
-		d.mu.Lock()
 		d.claims[req.Service] = claim
-		d.mu.Unlock()
-		d.log.Info("claim recorded", "service", claim.Service, "need_mib", claim.NeedMiB)
+	}
+	d.mu.Unlock()
+	if !dryRun {
+		d.log.Info("claim recorded", "service", claim.Service, "need_mib", claim.NeedMiB, "since", claim.At.Format(time.RFC3339))
 	}
 
 	obs := d.observer.Observe(ctx)
@@ -519,6 +530,7 @@ func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request) ipc.Respons
 		resp.Message = "dry run, nothing was done"
 		return resp
 	}
+	resp.Message = updated
 	resp.Executed = d.execute(ctx, plan)
 	// Whether the room asked for is there now is measured, not planned:
 	// the free figure after the last action, or the one the plan saw when
