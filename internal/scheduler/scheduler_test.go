@@ -586,3 +586,35 @@ func TestEvictAllExcept(t *testing.T) {
 		}
 	})
 }
+
+// With an unknown keep and no GPU reading both refusals are reported: fixing
+// the name alone would still leave nothing safe to do.
+func TestEvictAllExceptUnknownKeepWithoutGPU(t *testing.T) {
+	o := Observation{DeviceKnown: false, DeviceErr: "nvml device 0 memory: Unknown Error",
+		Services: []ServiceState{releasable("ollama", 50, 3000)}}
+	plan := EvictAllExcept(o, "olama")
+	if !plan.Empty() {
+		t.Fatalf("actions = %v, want none", steps(plan))
+	}
+	for _, want := range []string{"is not in the config", "GPU state could not be read, so no action is safe: nvml device 0 memory"} {
+		if !hasNote(plan, want) {
+			t.Errorf("no note %q\nnotes: %v", want, plan.Notes)
+		}
+	}
+}
+
+// A plan's lists are never null: an empty plan serialises with [] for both.
+func TestPlanListsAreNeverNull(t *testing.T) {
+	for name, plan := range map[string]Plan{
+		"decide":            Decide(cfg(false, 0, "", map[string]int{"a": 1}), obs(0, releasable("a", 1, 0))),
+		"decide no gpu":     Decide(cfg(false, 0, "", nil), Observation{}),
+		"evict":             Evict(obs(0), nil),
+		"evict no gpu":      Evict(Observation{}, []string{"a"}),
+		"all except":        EvictAllExcept(obs(0, releasable("a", 1, 0)), "a"),
+		"all except no gpu": EvictAllExcept(Observation{}, "ghost"),
+	} {
+		if plan.Actions == nil || plan.Notes == nil {
+			t.Errorf("%s: Actions nil %v, Notes nil %v; want both non nil", name, plan.Actions == nil, plan.Notes == nil)
+		}
+	}
+}

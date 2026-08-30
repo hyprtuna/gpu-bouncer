@@ -180,6 +180,11 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 	gpuReport := ipc.GPUReportOf(device, sourceName)
 	if deviceErr != nil {
 		gpuReport.Known = false
+		if device.Name == "" && device.BusID == "" {
+			// No device at all behind the index: report the index that was
+			// configured, not the zero of an empty device.
+			gpuReport.Index = cfg.Policy.GPUIndex
+		}
 		switch {
 		case sourceErr != nil:
 			// The source's own failure is the more useful message, because
@@ -251,7 +256,7 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 	}
 
 	if g.asJSON {
-		return writeJSON(env, report)
+		return writeJSON(env, statusOutputOf(report))
 	}
 	printStatus(env, report, cfg.Sources, cfg.Policy.GPUIndex, daemonUp, daemonDry)
 	return nil
@@ -273,7 +278,7 @@ func runPlan(ctx context.Context, args []string, g *globals, env Env) error {
 			return fmt.Errorf("%s", resp.Error)
 		}
 		if g.asJSON {
-			return writeJSON(env, resp)
+			return writeJSON(env, planOutput{OK: true, Plan: planOf(resp.Plan)})
 		}
 		printPlan(env, *resp.Plan, "the running daemon", g.verbose)
 		return nil
@@ -294,7 +299,7 @@ func runPlan(ctx context.Context, args []string, g *globals, env Env) error {
 	// No daemon means no claims, so this is the reactive policy view only.
 	plan := scheduler.Decide(cfg, observer.Observe(ctx))
 	if g.asJSON {
-		return writeJSON(env, ipc.Response{OK: true, Plan: &plan})
+		return writeJSON(env, planOutput{OK: true, Plan: planOf(&plan)})
 	}
 	printPlan(env, plan, "no daemon is running, so outstanding claims are not visible", g.verbose)
 	return nil
@@ -419,11 +424,14 @@ func callDaemon(ctx context.Context, g *globals, env Env, req ipc.Request) error
 	}
 
 	if g.asJSON {
-		if err := writeJSON(env, resp); err != nil {
+		if err := writeJSON(env, outputOf(req.Op, resp)); err != nil {
 			return err
 		}
 	} else {
 		printOutcome(env, resp, g.verbose)
+		if req.Op == ipc.OpRequest && resp.TargetMet != nil {
+			fmt.Fprintln(env.Stdout, shortfallLine(resp))
+		}
 		if failed > 0 {
 			fmt.Fprintln(env.Stdout, resp.Error)
 		}
@@ -432,6 +440,29 @@ func callDaemon(ctx context.Context, g *globals, env Env, req ipc.Request) error
 		return exitCode(1)
 	}
 	return nil
+}
+
+// shortfallLine says how much of the room a request asked for was actually
+// freed, whether or not the target was reached, so the answer to "did I get
+// it" is on the last line and not only in --json.
+func shortfallLine(resp ipc.Response) string {
+	plan := planOf(resp.Plan)
+	if plan.TargetFreeMiB <= plan.CurrentFreeMiB {
+		return fmt.Sprintf("the %s asked for were already free", mib(plan.TargetFreeMiB))
+	}
+	asked := plan.TargetFreeMiB - plan.CurrentFreeMiB
+	var freed uint64
+	if n := len(resp.Executed); n > 0 {
+		first, last := resp.Executed[0].FreeBeforeMiB, resp.Executed[n-1].FreeAfterMiB
+		if last > first {
+			freed = last - first
+		}
+	}
+	line := fmt.Sprintf("freed %s of the %s asked for", mib(freed), mib(asked))
+	if resp.TargetMet != nil && !*resp.TargetMet {
+		line += ", target not met"
+	}
+	return line
 }
 
 func writeJSON(env Env, value any) error {

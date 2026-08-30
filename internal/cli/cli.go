@@ -77,6 +77,25 @@ type exitCode int
 
 func (e exitCode) Error() string { return fmt.Sprintf("exit %d", int(e)) }
 
+// usageError is a command line that names no command or an unknown one. It
+// exits 2, and with --json it is reported as JSON like every other error.
+type usageError struct{ msg string }
+
+func (e usageError) Error() string { return e.msg }
+
+// usageFail reports a usageError once and returns 2.
+func usageFail(env Env, g *globals, err usageError) int {
+	if g.asJSON {
+		if werr := writeJSON(env, ipc.Response{OK: false, Error: err.msg}); werr != nil {
+			fmt.Fprintf(env.Stderr, "gpu-bouncer: %v\n", werr)
+		}
+		return 2
+	}
+	fmt.Fprint(env.Stderr, usage)
+	fmt.Fprintf(env.Stderr, "gpu-bouncer: %s\n", err.msg)
+	return 2
+}
+
 // Main runs one command and returns the process exit code.
 func Main(args []string, env Env) int {
 	if env.Stdout == nil {
@@ -123,8 +142,7 @@ func Main(args []string, env Env) int {
 		return 0
 	}
 	if len(rest) == 0 {
-		fmt.Fprint(env.Stderr, usage)
-		return 2
+		return usageFail(env, g, usageError{"no command given"})
 	}
 
 	if g.configPath != "" {
@@ -140,7 +158,10 @@ func Main(args []string, env Env) int {
 
 	command, commandArgs := rest[0], rest[1:]
 	err := dispatch(ctx, command, commandArgs, g, env)
-	var code exitCode
+	var (
+		code   exitCode
+		misuse usageError
+	)
 	switch {
 	case err == nil:
 		return 0
@@ -150,6 +171,8 @@ func Main(args []string, env Env) int {
 		return 0
 	case errors.As(err, &code):
 		return int(code)
+	case errors.As(err, &misuse):
+		return usageFail(env, g, misuse)
 	default:
 		return fail(env, g, err)
 	}
@@ -189,8 +212,7 @@ func dispatch(ctx context.Context, command string, args []string, g *globals, en
 		fmt.Fprint(env.Stdout, usage)
 		return nil
 	default:
-		fmt.Fprint(env.Stderr, usage)
-		return fmt.Errorf("unknown command %q", command)
+		return usageError{fmt.Sprintf("unknown command %q", command)}
 	}
 }
 

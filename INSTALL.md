@@ -343,6 +343,43 @@ code as the text mode. `--json status` carries `daemon_running` and `config`
 (the path, or `null` when no file was found) alongside the `gpu`, `devices`
 and `services` objects.
 
+### The JSON shapes
+
+Every `--json` response is one object on stdout. Lists are always present,
+empty as `[]`. An error on any command is `{"ok": false, "error": "..."}`
+with the same exit code as the text mode, including exit 2 for no command or
+an unknown one.
+
+`status`:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `ok` | bool | always true when the command ran |
+| `gpu` | object | the arbitrated device: `known`, `index`, `name`, `bus_id`, `vendor`, `source`, `total_mib`, `used_mib`, `free_mib`, `error`. `index` is the configured `gpu_index` even when no device is behind it; `error` says why `known` is false |
+| `devices` | list of the same object | every device the source sees |
+| `services` | list | per service: `name`, `adapter`, `priority`, `up`, `version`, `items`, `held_mib`, `held_estimated`, `idle`, `idle_known`, `allow_stop`, `error` |
+| `claims` | list | outstanding claims: `service`, `need_mib`, `at`; empty without a daemon |
+| `cooldowns` | list | services the daemon's loop is leaving alone: `service`, `until`, `reason`; empty without a daemon |
+| `daemon_running` | bool | whether a daemon answered |
+| `daemon_dry_run` | bool | whether that daemon plans and never acts |
+| `daemon_config` | object or null | what the daemon loaded: `path`, `sha256`, `loaded_at`; null without a daemon |
+| `config_stale` | bool | true when the files this command read differ from `daemon_config` |
+| `config` | string or null | the file(s) this command read; null when none was found |
+
+`plan`: `{"ok": true, "plan": {...}}` where `plan` has `trigger`,
+`beneficiary`, `current_free_mib`, `target_free_mib`, `total_mib`, `actions`
+(list of `service`, `verb`, `reason`, `expect_free_mib`) and `notes` (list of
+strings).
+
+`request` and `evict`: `ok`, `error` (only when an executed action failed:
+`N of M actions failed`), `message` (only on a dry run or a dry-run daemon),
+`plan` as above, `executed` (list of `service`, `verb`, `reason`, `acted`,
+`detail`, `error`, `free_before_mib`, `free_after_mib`), and on `request`
+only `target_met` (bool: the free VRAM measured after the last action is at
+or above the target).
+
+`release`: `{"ok": true, "message": "..."}`. `version`: `{"version": "..."}`.
+
 `request`, `release` and `evict` do change state, and they refuse to run
 without a daemon rather than acting directly. The daemon is the only component
 allowed to act, because it is the one holding the config that says which
@@ -351,7 +388,10 @@ command name, makes the daemon plan and report without acting; on `status`,
 `plan` and `version` it changes nothing because they never act. When any
 action a command executed failed, the text output ends with
 `N of M actions failed` and the command exits 1; an action the daemon
-declined with a reason, such as a busy ComfyUI, is not a failure.
+declined with a reason, such as a busy ComfyUI, is not a failure. A `request`
+that could not reach its target is not a failure either: it exits 0 and its
+last line says `freed X MiB of the Y MiB asked for, target not met`, with
+`target_met` false in JSON.
 
 ## Uninstall
 

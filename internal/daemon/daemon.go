@@ -213,24 +213,34 @@ func (d *Daemon) executeGuarded(ctx context.Context, action scheduler.Action) ip
 	return d.executeOne(ctx, action)
 }
 
-// applyCooldowns marks cooling services on an observation and forgets the
-// cooldowns that have ended. A cooldown ends at exactly its recorded time.
+// applyCooldowns marks cooling services on an observation and forgets every
+// cooldown that has ended, whether or not its service is in the observation.
+// A cooldown ends at exactly its recorded time.
 func (d *Daemon) applyCooldowns(obs *scheduler.Observation) {
 	now := d.now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for i := range obs.Services {
-		name := obs.Services[i].Name
-		c, ok := d.cooldowns[name]
-		if !ok {
-			continue
-		}
+	for name, c := range d.cooldowns {
 		if !now.Before(c.until) {
 			delete(d.cooldowns, name)
-			continue
 		}
-		obs.Services[i].CooldownUntil = c.until
 	}
+	for i := range obs.Services {
+		if c, ok := d.cooldowns[obs.Services[i].Name]; ok {
+			obs.Services[i].CooldownUntil = c.until
+		}
+	}
+}
+
+// elide bounds a service name echoed into a message. A name is an
+// identifier, and one of twenty thousand characters is a mistake or an
+// attack, not something to repeat in full.
+func elide(name string) string {
+	const limit = 80
+	if len(name) <= limit {
+		return name
+	}
+	return name[:limit] + "..."
 }
 
 // recordEffect starts a cooldown for a service whose action gained less than
@@ -475,7 +485,7 @@ func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request) ipc.Respons
 		return ipc.Response{Error: "request needs a service name"}
 	}
 	if _, ok := d.cfg.Service(req.Service); !ok {
-		return ipc.Response{Error: fmt.Sprintf("service %q is not in the config", req.Service)}
+		return ipc.Response{Error: fmt.Sprintf("service %q is not in the config", elide(req.Service))}
 	}
 
 	// A dry run, whether the request's own or the daemon's, must not leave a
@@ -510,6 +520,15 @@ func (d *Daemon) handleRequest(ctx context.Context, req ipc.Request) ipc.Respons
 		return resp
 	}
 	resp.Executed = d.execute(ctx, plan)
+	// Whether the room asked for is there now is measured, not planned:
+	// the free figure after the last action, or the one the plan saw when
+	// there was nothing to do.
+	free := plan.CurrentFreeMiB
+	if n := len(resp.Executed); n > 0 {
+		free = resp.Executed[n-1].FreeAfterMiB
+	}
+	met := free >= plan.TargetFreeMiB
+	resp.TargetMet = &met
 	return resp
 }
 
@@ -518,7 +537,7 @@ func (d *Daemon) handleReleaseClaim(req ipc.Request) ipc.Response {
 		return ipc.Response{Error: "release needs a service name"}
 	}
 	if _, ok := d.cfg.Service(req.Service); !ok {
-		return ipc.Response{Error: fmt.Sprintf("service %q is not in the config", req.Service)}
+		return ipc.Response{Error: fmt.Sprintf("service %q is not in the config", elide(req.Service))}
 	}
 	if d.dryRun {
 		// A dry-run daemon records no claims, so there is never one to drop.
@@ -553,7 +572,7 @@ func (d *Daemon) handleEvict(ctx context.Context, req ipc.Request) ipc.Response 
 		// A typo must be visible to a script, so this is an error and not
 		// an empty plan. For --all-except it is also the guard that keeps a
 		// typo from clearing the GPU.
-		return ipc.Response{Error: fmt.Sprintf("service %q is not in the config", req.Service)}
+		return ipc.Response{Error: fmt.Sprintf("service %q is not in the config", elide(req.Service))}
 	}
 	obs := d.observation(ctx)
 
