@@ -87,6 +87,9 @@ func Main(args []string, env Env) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// Global flags are accepted before the command name only. Everything from
+	// the command name onward belongs to the subcommand, which does its own
+	// order independent parsing.
 	rest := fs.Args()
 	if len(rest) == 0 {
 		fmt.Fprint(env.Stderr, usage)

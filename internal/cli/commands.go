@@ -27,6 +27,30 @@ func newFlagSet(name string, env Env) *flag.FlagSet {
 	return fs
 }
 
+// parseArgs parses flags that appear anywhere, before or after the positional
+// arguments, and returns the positionals.
+//
+// The flag package stops at the first non flag argument, which would make
+// "gpu-bouncer request assistant --need-mib 6144" fail with a complaint about
+// too many service names. That is the order people actually type. Parsing in a
+// loop and peeling off one positional per pass keeps the flag package's own
+// knowledge of which flags take a value, so a value that looks like a
+// positional is never mistaken for one.
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+}
+
 // runDaemon runs the arbitration service in the foreground. systemd supervises
 // it; it does not daemonise itself.
 func runDaemon(ctx context.Context, args []string, g globals, env Env) error {
@@ -196,25 +220,28 @@ func runPlan(ctx context.Context, args []string, g globals, env Env) error {
 func runRequest(ctx context.Context, args []string, g globals, env Env) error {
 	fs := newFlagSet("request", env)
 	needMiB := fs.Uint64("need-mib", 0, "free VRAM wanted in MiB (default: the policy floor)")
-	if err := fs.Parse(args); err != nil {
+	dryRun := fs.Bool("dry-run", false, "do not change anything")
+	positional, err := parseArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	service, err := oneService(fs.Args(), "request")
+	service, err := oneService(positional, "request")
 	if err != nil {
 		return err
 	}
 	return callDaemon(ctx, g, env, ipc.Request{
-		Op: ipc.OpRequest, Service: service, NeedMiB: *needMiB, DryRun: g.dryRun,
+		Op: ipc.OpRequest, Service: service, NeedMiB: *needMiB, DryRun: g.dryRun || *dryRun,
 	})
 }
 
 // runReleaseClaim drops a claim. It does not itself free any VRAM.
 func runReleaseClaim(ctx context.Context, args []string, g globals, env Env) error {
 	fs := newFlagSet("release", env)
-	if err := fs.Parse(args); err != nil {
+	positional, err := parseArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	service, err := oneService(fs.Args(), "release")
+	service, err := oneService(positional, "release")
 	if err != nil {
 		return err
 	}
@@ -225,18 +252,20 @@ func runReleaseClaim(ctx context.Context, args []string, g globals, env Env) err
 func runEvict(ctx context.Context, args []string, g globals, env Env) error {
 	fs := newFlagSet("evict", env)
 	allExcept := fs.String("all-except", "", "free every configured service except this one")
-	if err := fs.Parse(args); err != nil {
+	dryRun := fs.Bool("dry-run", false, "do not change anything")
+	positional, err := parseArgs(fs, args)
+	if err != nil {
 		return err
 	}
 
-	req := ipc.Request{Op: ipc.OpEvict, DryRun: g.dryRun}
+	req := ipc.Request{Op: ipc.OpEvict, DryRun: g.dryRun || *dryRun}
 	switch {
-	case *allExcept != "" && len(fs.Args()) > 0:
+	case *allExcept != "" && len(positional) > 0:
 		return fmt.Errorf("give either a service name or --all-except, not both")
 	case *allExcept != "":
 		req.Service, req.AllExcept = *allExcept, true
 	default:
-		service, err := oneService(fs.Args(), "evict")
+		service, err := oneService(positional, "evict")
 		if err != nil {
 			return err
 		}
