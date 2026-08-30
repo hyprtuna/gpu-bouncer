@@ -240,6 +240,30 @@ so a user daemon wins over a system one, matching the config layering. Setting
 both the client and the daemon. `gpu-bouncer daemon --socket <path>` sets it
 for the daemon alone.
 
+### The daemon does not reload its configuration
+
+The daemon reads the config files once, at startup, and never again. Every
+client invocation reads them afresh, so after an edit `status` shows the new
+file while `plan`, `request`, `release` and `evict` are answered by a daemon
+that still holds the old one. `status` notices: when the files it read differ
+from what the daemon loaded, it ends with
+
+```
+the daemon loaded a different config (/home/you/.config/gpu-bouncer/config.toml, loaded 2026-08-30T12:00:00+03:00); restart it to apply your edit
+```
+
+and `--json status` sets `config_stale` to `true` next to `daemon_config`,
+which carries the path, a SHA-256 of the loaded files and the load time.
+Restart the daemon to apply the edit:
+
+```sh
+systemctl --user restart gpu-bouncer      # user unit
+sudo systemctl restart gpu-bouncer        # system unit
+```
+
+or stop and start it again if you are running it in the foreground. A
+restart drops every outstanding claim, which are deliberately not persisted.
+
 ### Running the daemon in the foreground
 
 The daemon does not fork. It runs in the foreground and expects systemd to

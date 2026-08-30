@@ -232,6 +232,14 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 			report.Claims = claims.Claims
 			report.Cooldowns = claims.Cooldowns
 		}
+		// The daemon never reloads. If the files this command just read
+		// differ from what the daemon loaded, every other command is
+		// talking to a config the user no longer sees.
+		if resp.DaemonConfig != nil {
+			report.DaemonConfig = resp.DaemonConfig
+			stale := resp.DaemonConfig.SHA256 != cfg.Hash
+			report.ConfigStale = &stale
+		}
 	}
 	report.DaemonRunning = &daemonUp
 	if daemonUp {
@@ -571,6 +579,10 @@ func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, d
 	}
 	if len(sources) > 0 {
 		fmt.Fprintf(out, "Config: %s\n", strings.Join(sources, ", "))
+	}
+	if report.ConfigStale != nil && *report.ConfigStale && report.DaemonConfig != nil {
+		fmt.Fprintf(out, "the daemon loaded a different config (%s, loaded %s); restart it to apply your edit\n",
+			report.DaemonConfig.Path, report.DaemonConfig.LoadedAt.Format(time.RFC3339))
 	}
 }
 
