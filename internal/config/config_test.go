@@ -196,12 +196,12 @@ func TestValidateRejects(t *testing.T) {
 		{
 			name:    "poll_interval of zero",
 			body:    "[policy]\npoll_interval = \"0s\"\n",
-			wantErr: "policy.poll_interval must be a positive duration",
+			wantErr: "policy.poll_interval must be at least 1s",
 		},
 		{
 			name:    "negative poll_interval",
 			body:    "[policy]\npoll_interval = \"-1s\"\n",
-			wantErr: "policy.poll_interval must be a positive duration",
+			wantErr: "policy.poll_interval must be at least 1s",
 		},
 		{
 			name:    "action_cooldown of zero",

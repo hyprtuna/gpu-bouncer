@@ -149,8 +149,11 @@ priority = 50
 Save it as `~/.config/gpu-bouncer/config.toml`. Everything else takes a
 default: `vram_floor_mib = 512`, `reactive = false`, `poll_interval = "5s"`,
 `gpu_index = 0`, `min_effect_mib = 64`, `action_cooldown = "60s"`, and per
-service a `timeout` of `5s` and a `drain_timeout` of `30s`. A duration set to
-zero or less is an error, not a request for the default.
+service a `timeout` of `5s` and a `drain_timeout` of `30s`. A number outside
+its range is an error, not a request for the default: a duration of zero or
+less, a `poll_interval` under `1s`, or a negative `vram_floor_mib`,
+`min_effect_mib` or `gpu_index`. `priority` is the one key that may be
+negative.
 
 With `reactive = false`, which is the default, gpu-bouncer never acts on its
 own. It acts only when you run `gpu-bouncer request` or `gpu-bouncer evict`.
