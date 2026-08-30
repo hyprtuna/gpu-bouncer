@@ -229,6 +229,7 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 		daemonUp = true
 		if claims, err := ipc.Do(ctx, ipc.Request{Op: ipc.OpStatus}); err == nil {
 			report.Claims = claims.Claims
+			report.Cooldowns = claims.Cooldowns
 		}
 	}
 	report.DaemonRunning = &daemonUp
@@ -500,7 +501,7 @@ func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, d
 				fmt.Fprintf(out, "  %s\n", p)
 			}
 		}
-		return
+		fmt.Fprintln(out)
 	}
 
 	for _, s := range report.Services {
@@ -545,6 +546,13 @@ func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, d
 		fmt.Fprintln(out, "Outstanding claims:")
 		for _, c := range report.Claims {
 			fmt.Fprintf(out, "  %s wants %s since %s\n", c.Service, mib(c.NeedMiB), c.At.Format(time.RFC3339))
+		}
+		fmt.Fprintln(out)
+	}
+	if len(report.Cooldowns) > 0 {
+		fmt.Fprintln(out, "Cooling down, left alone by reactive plans:")
+		for _, c := range report.Cooldowns {
+			fmt.Fprintf(out, "  %s until %s: %s\n", c.Service, c.Until.Format(time.RFC3339), c.Reason)
 		}
 		fmt.Fprintln(out)
 	}

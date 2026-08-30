@@ -184,6 +184,8 @@ change what the daemon is willing to do.
 | `poll_interval` | `"5s"` | How often to sample VRAM and probe services. |
 | `default_workload` | unset | The service reactive mode defends. Unset means the highest priority service that is up. |
 | `gpu_index` | `0` | Which GPU to arbitrate. |
+| `min_effect_mib` | `64` | The smallest measured gain in free VRAM that counts as an action having worked. |
+| `action_cooldown` | `"60s"` | After an action that gained less than `min_effect_mib`, or failed, reactive plans leave that service alone for this long. `request` and `evict` bypass it. `status` lists active cooldowns. |
 
 ### `[[service]]`
 

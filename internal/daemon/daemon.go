@@ -32,11 +32,23 @@ type Daemon struct {
 	// done. It is the global --dry-run flag.
 	dryRun bool
 
+	// now is the clock. Tests inject one so cooldown timing can be exact.
+	now func() time.Time
+
 	mu sync.Mutex
 	// claims are held until released or until the daemon restarts. They are
 	// deliberately not persisted: a claim that outlived the process that made
 	// it would keep evicting services with nobody left to release it.
 	claims map[string]scheduler.Claim
+	// cooldowns are services a recent action did nothing for, keyed by name.
+	// Reactive plans skip them until the recorded time; explicit request and
+	// evict do not consult them. Like claims, they live only in memory.
+	cooldowns map[string]cooldown
+}
+
+type cooldown struct {
+	until  time.Time
+	reason string
 }
 
 // New builds a daemon over an already opened GPU source.
@@ -49,11 +61,13 @@ func New(cfg config.Config, source gpu.Source, log *slog.Logger, dryRun bool) (*
 		log = slog.Default()
 	}
 	return &Daemon{
-		cfg:      cfg,
-		observer: observer,
-		log:      log,
-		dryRun:   dryRun,
-		claims:   make(map[string]scheduler.Claim),
+		cfg:       cfg,
+		observer:  observer,
+		log:       log,
+		dryRun:    dryRun,
+		now:       time.Now,
+		claims:    make(map[string]scheduler.Claim),
+		cooldowns: make(map[string]cooldown),
 	}, nil
 }
 
@@ -78,6 +92,8 @@ func (d *Daemon) Run(ctx context.Context, socketPath string) error {
 		"reactive", d.cfg.Policy.Reactive,
 		"vram_floor_mib", d.cfg.Policy.VRAMFloorMiB,
 		"poll_interval", d.cfg.Policy.PollInterval.D().String(),
+		"min_effect_mib", d.cfg.Policy.MinEffectMiB,
+		"action_cooldown", d.cfg.Policy.ActionCooldown.D().String(),
 		"dry_run", d.dryRun,
 	)
 	if len(d.cfg.Services) == 0 {
@@ -107,9 +123,13 @@ func (d *Daemon) Run(ctx context.Context, socketPath string) error {
 	}
 }
 
-// tick runs one arbitration round.
+// tick runs one arbitration round. It is the one caller that honours
+// cooldowns: an action the loop already tried and measured as useless is not
+// tried again every poll, which for a llama-swap release would mean killing
+// in flight requests once per poll_interval forever.
 func (d *Daemon) tick(ctx context.Context) {
 	obs := d.observation(ctx)
+	d.applyCooldowns(&obs)
 	plan := scheduler.Decide(d.cfg, obs)
 	if plan.Empty() {
 		return
@@ -129,6 +149,62 @@ func (d *Daemon) observation(ctx context.Context) scheduler.Observation {
 	obs := d.observer.Observe(ctx)
 	obs.Claims = d.snapshotClaims()
 	return obs
+}
+
+// applyCooldowns marks cooling services on an observation and forgets the
+// cooldowns that have ended. A cooldown ends at exactly its recorded time.
+func (d *Daemon) applyCooldowns(obs *scheduler.Observation) {
+	now := d.now()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := range obs.Services {
+		name := obs.Services[i].Name
+		c, ok := d.cooldowns[name]
+		if !ok {
+			continue
+		}
+		if !now.Before(c.until) {
+			delete(d.cooldowns, name)
+			continue
+		}
+		obs.Services[i].CooldownUntil = c.until
+	}
+}
+
+// recordEffect starts a cooldown for a service whose action gained less than
+// policy.min_effect_mib of free VRAM, or failed, and ends any cooldown for a
+// service whose action worked. It is the only place cooldowns begin.
+func (d *Daemon) recordEffect(r ipc.ActionResult) {
+	gain := int64(r.FreeAfterMiB) - int64(r.FreeBeforeMiB)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if r.Error == "" && gain >= int64(d.cfg.Policy.MinEffectMiB) {
+		delete(d.cooldowns, r.Service)
+		return
+	}
+	reason := fmt.Sprintf("%s freed %d MiB, below min_effect_mib %d", r.Verb, gain, d.cfg.Policy.MinEffectMiB)
+	if r.Error != "" {
+		reason = r.Verb + " failed: " + r.Error
+	}
+	until := d.now().Add(d.cfg.Policy.ActionCooldown.D())
+	d.cooldowns[r.Service] = cooldown{until: until, reason: reason}
+	d.log.Warn("cooldown started, reactive plans will leave this service alone",
+		"service", r.Service, "until", until.Format(time.RFC3339), "reason", reason)
+}
+
+func (d *Daemon) snapshotCooldowns() []ipc.CooldownReport {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	now := d.now()
+	out := make([]ipc.CooldownReport, 0, len(d.cooldowns))
+	for name, c := range d.cooldowns {
+		if !now.Before(c.until) {
+			continue
+		}
+		out = append(out, ipc.CooldownReport{Service: name, Until: c.until, Reason: c.reason})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Service < out[j].Service })
+	return out
 }
 
 func (d *Daemon) snapshotClaims() []scheduler.Claim {
@@ -220,6 +296,7 @@ func (d *Daemon) executeOne(ctx context.Context, action scheduler.Action) ipc.Ac
 	after, _ := d.observer.Device(ctx)
 	result.FreeAfterMiB = after.FreeMiB()
 	d.logAction(result)
+	d.recordEffect(result)
 	return result
 }
 
@@ -302,11 +379,16 @@ func (d *Daemon) handleStatus(ctx context.Context) ipc.Response {
 	for _, c := range d.snapshotClaims() {
 		resp.Claims = append(resp.Claims, ipc.ClaimReport{Service: c.Service, NeedMiB: c.NeedMiB, At: c.At})
 	}
+	resp.Cooldowns = d.snapshotCooldowns()
 	return resp
 }
 
+// handlePlan answers `gpu-bouncer plan` with what the next tick would do,
+// cooldowns included, so the preview matches the loop.
 func (d *Daemon) handlePlan(ctx context.Context) ipc.Response {
-	plan := scheduler.Decide(d.cfg, d.observation(ctx))
+	obs := d.observation(ctx)
+	d.applyCooldowns(&obs)
+	plan := scheduler.Decide(d.cfg, obs)
 	return ipc.Response{OK: true, Plan: &plan}
 }
 

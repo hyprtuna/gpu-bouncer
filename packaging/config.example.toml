@@ -28,6 +28,14 @@ poll_interval = "5s"
 # Which GPU to arbitrate. v0.1 arbitrates one.
 gpu_index = 0
 
+# An action that gains less than this much free VRAM, measured by the driver
+# either side of it, did not work. The service then enters a cooldown of
+# action_cooldown during which reactive plans leave it alone, so a service
+# that reloads its model the moment it is released is not released once per
+# poll forever. An explicit "request" or "evict" ignores the cooldown.
+min_effect_mib = 64
+action_cooldown = "60s"
+
 # Priority is an integer and higher wins. Services at equal priority never
 # evict one another.
 

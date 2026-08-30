@@ -120,13 +120,14 @@ type Response struct {
 
 	// GPU is the arbitrated device. Devices is every device the source sees,
 	// so that a wrong gpu_index can be diagnosed from the output alone.
-	GPU      *GPUReport      `json:"gpu,omitempty"`
-	Devices  []GPUReport     `json:"devices,omitempty"`
-	Services []ServiceReport `json:"services,omitempty"`
-	Plan     *scheduler.Plan `json:"plan,omitempty"`
-	Executed []ActionResult  `json:"executed,omitempty"`
-	Claims   []ClaimReport   `json:"claims,omitempty"`
-	Message  string          `json:"message,omitempty"`
+	GPU       *GPUReport       `json:"gpu,omitempty"`
+	Devices   []GPUReport      `json:"devices,omitempty"`
+	Services  []ServiceReport  `json:"services,omitempty"`
+	Plan      *scheduler.Plan  `json:"plan,omitempty"`
+	Executed  []ActionResult   `json:"executed,omitempty"`
+	Claims    []ClaimReport    `json:"claims,omitempty"`
+	Cooldowns []CooldownReport `json:"cooldowns,omitempty"`
+	Message   string           `json:"message,omitempty"`
 
 	// DaemonRunning and Config are filled by the status command only, which
 	// reuses this type as its report. Config is the path the configuration
@@ -140,6 +141,14 @@ type ClaimReport struct {
 	Service string    `json:"service"`
 	NeedMiB uint64    `json:"need_mib"`
 	At      time.Time `json:"at"`
+}
+
+// CooldownReport is one service that reactive plans are leaving alone until
+// Until, because the last action on it had no measurable effect.
+type CooldownReport struct {
+	Service string    `json:"service"`
+	Until   time.Time `json:"until"`
+	Reason  string    `json:"reason"`
 }
 
 // Claims converts reports back into scheduler claims.

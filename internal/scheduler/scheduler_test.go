@@ -335,6 +335,18 @@ func TestDecideGolden(t *testing.T) {
 			wantNote:    "there is no floor to defend",
 		},
 		{
+			name: "a service cooling down is passed over with the time the cooldown ends",
+			cfg:  cfg(true, 2048, "", map[string]int{"ollama": 50, "comfyui": 20}),
+			obs: obs(7188,
+				releasable("ollama", 50, 200),
+				ServiceState{Name: "comfyui", Priority: 20, Up: true, HeldMiB: 6988, CanRelease: true,
+					CooldownUntil: time.Date(2026, 8, 30, 12, 1, 0, 0, time.UTC)}),
+			wantSteps:   nil,
+			wantTrigger: TriggerReactive,
+			wantBenefit: "ollama",
+			wantNote:    "comfyui left alone, cooling down until 2026-08-30T12:01:00Z",
+		},
+		{
 			name: "a service holding nothing is not evicted, and says so",
 			cfg:  cfg(true, 2048, "", map[string]int{"ollama": 50, "comfyui": 20, "idle": 5}),
 			obs: obs(7188,
