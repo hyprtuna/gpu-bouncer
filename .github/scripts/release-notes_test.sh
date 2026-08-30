@@ -100,4 +100,116 @@ expect_fail "empty section" v1.2.3 "$tmp/empty.md" "the 1.2.3 section of $tmp/em
 printf '# Changelog\n\nnothing released\n' > "$tmp/none.md"
 expect_fail "no released section" v1.2.3 "$tmp/none.md" "has no released section"
 
+# A body with no non-whitespace character is empty, whatever it is made of.
+# A section of spaces or tabs used to be published as spaces or tabs.
+printf '## [1.2.3] - 2026-01-01\n   \n\t\n## [1.2.2]\n\n- old\n' > "$tmp/spaces.md"
+expect_fail "body of only spaces and tabs" v1.2.3 "$tmp/spaces.md" "the 1.2.3 section of $tmp/spaces.md is empty"
+
+# CRLF. Carriage returns must not reach the body, and a section that is empty
+# apart from them must be refused rather than published as bare returns.
+printf '# Changelog\r\n\r\n## [1.2.3] - 2026-01-01\r\n\r\n- one\r\n- two\r\n\r\n## [1.2.2]\r\n\r\n- old\r\n' > "$tmp/crlf.md"
+expect_notes "CRLF changelog" v1.2.3 "$tmp/crlf.md" $'- one\n- two'
+printf '## [1.2.3] - 2026-01-01\r\n\r\n\r\n## [1.2.2]\r\n\r\n- old\r\n' > "$tmp/crlf_empty.md"
+expect_fail "CRLF empty section" v1.2.3 "$tmp/crlf_empty.md" "the 1.2.3 section of $tmp/crlf_empty.md is empty"
+printf '# Changelog\r\n\r\n## [1.2.3]\r\n\r\n- one\r\n\r\n## [1.2.3]\r\n\r\n- again\r\n' > "$tmp/crlf_dup.md"
+expect_fail "CRLF duplicated section" v1.2.3 "$tmp/crlf_dup.md" "has 2 sections headed [1.2.3]"
+printf '# Changelog\r\n\r\n## [1.2.3]\r\n\r\n- one\r\n' > "$tmp/crlf_top.md"
+expect_fail "CRLF wrong top version" v1.2.2 "$tmp/crlf_top.md" "is 1.2.3, but the tag is v1.2.2"
+
+# A fenced code block is content. A heading or a link definition inside one is
+# an example, and treating it as the end of the section silently dropped
+# everything after it.
+cat > "$tmp/fence_heading.md" <<'MD'
+## [1.2.3] - 2026-01-01
+
+- before the fence
+
+```
+## [9.9.9] - 1999-01-01
+```
+
+- after the fence
+
+## [1.2.2]
+
+- old
+MD
+expect_notes "heading inside a fence" v1.2.3 "$tmp/fence_heading.md" \
+  $'- before the fence\n\n```\n## [9.9.9] - 1999-01-01\n```\n\n- after the fence'
+
+cat > "$tmp/fence_link.md" <<'MD'
+## [1.2.3] - 2026-01-01
+
+- before the fence
+
+```
+[example]: https://example.invalid/x
+```
+
+- after the fence
+
+[1.2.3]: https://example/compare/v1.2.2...v1.2.3
+MD
+expect_notes "link definition inside a fence" v1.2.3 "$tmp/fence_link.md" \
+  $'- before the fence\n\n```\n[example]: https://example.invalid/x\n```\n\n- after the fence'
+
+# Tilde fences are fences too.
+cat > "$tmp/fence_tilde.md" <<'MD'
+## [1.2.3] - 2026-01-01
+
+~~~
+## [9.9.9]
+~~~
+
+- after
+MD
+expect_notes "tilde fence" v1.2.3 "$tmp/fence_tilde.md" $'~~~\n## [9.9.9]\n~~~\n\n- after'
+
+# A duplicate heading inside a fence is an example, not a second section.
+cat > "$tmp/fence_dup.md" <<'MD'
+## [1.2.3] - 2026-01-01
+
+```
+## [1.2.3]
+```
+
+- real content
+MD
+expect_notes "a heading inside a fence is not a second section" v1.2.3 "$tmp/fence_dup.md" \
+  $'```\n## [1.2.3]\n```\n\n- real content'
+
+# Counting the string anywhere on a line made a note that quotes its own
+# heading in prose look like a second copy, which blocked the release.
+cat > "$tmp/prose.md" <<'MD'
+## [1.2.3] - 2026-01-01
+
+- the section headed `## [1.2.3]` is written by hand
+MD
+expect_notes "a heading quoted in prose is not a second section" v1.2.3 "$tmp/prose.md" \
+  '- the section headed `## [1.2.3]` is written by hand'
+
+# A real duplicate is still a duplicate, fences and prose notwithstanding.
+cat > "$tmp/real_dup.md" <<'MD'
+## [1.2.3] - 2026-01-01
+
+- first
+
+## [1.2.3] - 2026-01-01
+
+- second
+MD
+expect_fail "a real duplicate outside any fence" v1.2.3 "$tmp/real_dup.md" "has 2 sections headed [1.2.3]"
+
+# An uppercase V keeps its V, matches no heading, and is refused. Recorded so
+# that a change to the tag handling cannot quietly start accepting it.
+expect_fail "uppercase V tag" V1.2.3 "$tmp/plain.md" "but the tag is V1.2.3"
+
+# And the repository's own CHANGELOG, which is what the gate runs.
+top=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?\]' CHANGELOG.md | sed -e 's/^## \[//' -e 's/\]$//')
+if "$script" "v$top" CHANGELOG.md >/dev/null 2>"$tmp/err"; then
+  ok "the repository's own top section extracts"
+else
+  bad "the repository's own top section: $(cat "$tmp/err")"
+fi
+
 exit $fail
