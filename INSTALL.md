@@ -37,13 +37,14 @@ A binary installed this way reports the module version Go recorded in it:
 
 ```
 $ gpu-bouncer version
-gpu-bouncer v0.1.2
+gpu-bouncer v0.1.3
 ```
 
 `gpu-bouncer --version` prints the same line. A plain `go build` in a git
-checkout reports what Go records for it, the nearest tag or a pseudo-version
-such as `v0.1.2-0.20260830102548-6beb4269d63d+dirty`; a build from a tree
-with no git history reports `gpu-bouncer dev`. The `-ldflags` line under
+checkout reports what Go records for it: the nearest tag at a tagged commit,
+and past one a pseudo-version built from the next patch number, a timestamp
+and the commit hash, with `+dirty` appended for uncommitted changes. A build
+from a tree with no git history reports `gpu-bouncer dev`. The `-ldflags` line under
 [Build from source](#build-from-source) stamps an exact version either way.
 
 ## Install from a release binary
@@ -53,7 +54,7 @@ carries two files: a `.tar.gz` holding the single `gpu-bouncer` binary, and a
 `.sha256` file for it.
 
 ```sh
-version=v0.1.2
+version=v0.1.3
 base=gpu-bouncer_${version}_linux_amd64.tar.gz
 
 curl -LO "https://github.com/hyprtuna/gpu-bouncer/releases/download/${version}/${base}"
@@ -69,7 +70,7 @@ downloaded:
 sha256sum -c "${base}.sha256"
 ```
 
-That prints `gpu-bouncer_v0.1.2_linux_amd64.tar.gz: OK` and exits 0. Anything
+That prints `gpu-bouncer_v0.1.3_linux_amd64.tar.gz: OK` and exits 0. Anything
 else means the download does not match what was published: stop, and do not
 unpack it.
 
@@ -99,7 +100,7 @@ To stamp a version number, set the same variable the release workflow sets:
 
 ```sh
 go build -trimpath \
-  -ldflags "-X github.com/hyprtuna/gpu-bouncer/internal/cli.Version=v0.1.2" \
+  -ldflags "-X github.com/hyprtuna/gpu-bouncer/internal/cli.Version=v0.1.3" \
   -o gpu-bouncer ./cmd/gpu-bouncer
 ```
 
@@ -319,7 +320,7 @@ gpu-bouncer version
 ```
 
 ```
-gpu-bouncer v0.1.2
+gpu-bouncer v0.1.3
 ```
 
 ```sh
