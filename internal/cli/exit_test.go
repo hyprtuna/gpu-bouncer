@@ -294,7 +294,7 @@ func TestExitCodesAndFirstLines(t *testing.T) {
 		{
 			name:       "an unknown command prints the usage and one error line",
 			args:       []string{"frobnicate"},
-			wantCode:   1,
+			wantCode:   2,
 			wantStderr: "gpu-bouncer arbitrates one GPU between local AI services.",
 		},
 	}
@@ -658,5 +658,153 @@ func TestStatusNoticesAStaleDaemonConfig(t *testing.T) {
 	}
 	if decoded.ConfigStale == nil || !*decoded.ConfigStale {
 		t.Errorf("after the edit: config_stale = %v, want true", decoded.ConfigStale)
+	}
+}
+
+// Usage errors exit 2 and, with --json, are one JSON object on stdout with
+// nothing on stderr, like every other error.
+func TestUsageErrorsExitTwo(t *testing.T) {
+	for _, tt := range []struct {
+		args     []string
+		wantJSON bool
+	}{
+		{[]string{}, false},
+		{[]string{"--json"}, true},
+		{[]string{"frobnicate"}, false},
+		{[]string{"--json", "frobnicate"}, true},
+	} {
+		code, stdout, stderr := run(tt.args...)
+		if code != 2 {
+			t.Errorf("%v: exit %d, want 2", tt.args, code)
+		}
+		if tt.wantJSON {
+			var decoded struct {
+				OK    bool   `json:"ok"`
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &decoded); err != nil || decoded.OK || decoded.Error == "" {
+				t.Errorf("%v: stdout = %q, want {ok:false, error}", tt.args, stdout)
+			}
+			if stderr != "" {
+				t.Errorf("%v: stderr = %q, want nothing with --json", tt.args, stderr)
+			}
+			continue
+		}
+		if stdout != "" || !strings.Contains(stderr, "Usage:") {
+			t.Errorf("%v: stdout = %q, stderr = %q; want the usage on stderr only", tt.args, stdout, stderr)
+		}
+	}
+}
+
+// Every list in the JSON output is present, empty as [], never null or
+// absent, and the keys a consumer may read are always there.
+func TestJSONShapesHaveEveryKey(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "empty.toml")
+	if err := os.WriteFile(cfgPath, []byte("[policy]\nvram_floor_mib = 512\ngpu_index = 9\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvConfig, cfgPath)
+	t.Setenv(ipc.EnvSocket, filepath.Join(t.TempDir(), "none.sock"))
+
+	_, stdout, _ := run("--json", "status")
+	var status map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &status); err != nil {
+		t.Fatalf("status is not JSON: %v", err)
+	}
+	for _, key := range []string{"ok", "gpu", "devices", "services", "claims", "cooldowns", "daemon_running", "daemon_dry_run", "daemon_config", "config_stale", "config"} {
+		if _, ok := status[key]; !ok {
+			t.Errorf("status lacks %q: %s", key, stdout)
+		}
+	}
+	for _, key := range []string{"services", "claims", "cooldowns"} {
+		if v := string(status[key]); v != "[]" {
+			t.Errorf("status %s = %s, want [] with nothing configured and no daemon", key, v)
+		}
+	}
+	// devices depends on the machine's GPU source; it must be a list either way.
+	if v := string(status["devices"]); !strings.HasPrefix(v, "[") {
+		t.Errorf("status devices = %.40s, want a list", v)
+	}
+	var gpuField struct {
+		Index int `json:"index"`
+	}
+	if err := json.Unmarshal(status["gpu"], &gpuField); err != nil || gpuField.Index != 9 {
+		t.Errorf("gpu.index = %d (%v), want the configured 9", gpuField.Index, err)
+	}
+
+	_, stdout, _ = run("--json", "plan")
+	var plan struct {
+		Plan map[string]json.RawMessage `json:"plan"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
+		t.Fatalf("plan is not JSON: %v", err)
+	}
+	if string(plan.Plan["actions"]) != "[]" {
+		t.Errorf("plan.actions = %s, want []", plan.Plan["actions"])
+	}
+	if strings.HasPrefix(string(plan.Plan["notes"]), "null") {
+		t.Errorf("plan.notes = %s, want a list", plan.Plan["notes"])
+	}
+}
+
+// A request reports whether it got the room it asked for, on the last text
+// line and as target_met in JSON, and exits 0 either way.
+func TestRequestReportsTheShortfall(t *testing.T) {
+	startDaemon(t,
+		config.Service{Name: "top", Adapter: config.AdapterOllama, Endpoint: fakeOllama(t, http.StatusOK), Priority: 90},
+		config.Service{Name: "low", Adapter: config.AdapterOllama, Endpoint: fakeOllama(t, http.StatusOK), Priority: 10},
+	)
+	// The fixed GPU never changes, so nothing is ever freed and the target
+	// is out of reach: 8192 asked on a card with 3192 free.
+	code, stdout, _ := run("request", "top", "--need-mib", "8192")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0: a shortfall is not a failure", code)
+	}
+	if got := lastLine(stdout); got != "freed 0 MiB of the 5000 MiB asked for, target not met" {
+		t.Errorf("last line = %q", got)
+	}
+	code, stdout, _ = run("--json", "request", "top", "--need-mib", "8192")
+	var decoded struct {
+		OK        bool  `json:"ok"`
+		TargetMet *bool `json:"target_met"`
+		Executed  []any `json:"executed"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("stdout is not JSON: %v", err)
+	}
+	if code != 0 || !decoded.OK || decoded.TargetMet == nil || *decoded.TargetMet || decoded.Executed == nil {
+		t.Errorf("exit %d, ok %v, target_met %v, executed %v; want 0, true, false, a list", code, decoded.OK, decoded.TargetMet, decoded.Executed)
+	}
+
+	// A request already satisfied says so, and target_met is true.
+	code, stdout, _ = run("request", "top", "--need-mib", "1000")
+	if code != 0 || lastLine(stdout) != "the 1000 MiB asked for were already free" {
+		t.Errorf("exit %d, last line %q", code, lastLine(stdout))
+	}
+	_, stdout, _ = run("--json", "request", "top", "--need-mib", "1000")
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil || decoded.TargetMet == nil || !*decoded.TargetMet {
+		t.Errorf("target_met = %v (%v), want true", decoded.TargetMet, err)
+	}
+
+	// release --json has its own small shape.
+	_, stdout, _ = run("--json", "release", "top")
+	var rel map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &rel); err != nil || len(rel) != 2 || string(rel["ok"]) != "true" {
+		t.Errorf("release --json = %s, want {ok, message}", stdout)
+	}
+}
+
+// A service name of twenty thousand characters is echoed back elided.
+func TestLongNamesAreElided(t *testing.T) {
+	startDaemon(t, config.Service{Name: "good", Adapter: config.AdapterOllama, Endpoint: fakeOllama(t, http.StatusOK), Priority: 10})
+	long := strings.Repeat("x", 20000)
+	for _, args := range [][]string{{"request", long}, {"evict", long}, {"release", long}, {"evict", "--all-except", long}} {
+		code, _, stderr := run(args...)
+		if code != 1 {
+			t.Errorf("%s: exit %d, want 1", args[0], code)
+		}
+		if len(stderr) > 200 || !strings.Contains(stderr, "...") {
+			t.Errorf("%s: stderr is %d bytes: %.120s", args[0], len(stderr), stderr)
+		}
 	}
 }

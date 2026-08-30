@@ -121,11 +121,14 @@ type Response struct {
 
 	// GPU is the arbitrated device. Devices is every device the source sees,
 	// so that a wrong gpu_index can be diagnosed from the output alone.
-	GPU       *GPUReport       `json:"gpu,omitempty"`
-	Devices   []GPUReport      `json:"devices,omitempty"`
-	Services  []ServiceReport  `json:"services,omitempty"`
-	Plan      *scheduler.Plan  `json:"plan,omitempty"`
-	Executed  []ActionResult   `json:"executed,omitempty"`
+	GPU      *GPUReport      `json:"gpu,omitempty"`
+	Devices  []GPUReport     `json:"devices,omitempty"`
+	Services []ServiceReport `json:"services,omitempty"`
+	Plan     *scheduler.Plan `json:"plan,omitempty"`
+	Executed []ActionResult  `json:"executed,omitempty"`
+	// TargetMet is set on a request reply: whether the free VRAM measured
+	// after the last action is at or above the target the request set.
+	TargetMet *bool            `json:"target_met,omitempty"`
 	Claims    []ClaimReport    `json:"claims,omitempty"`
 	Cooldowns []CooldownReport `json:"cooldowns,omitempty"`
 	Message   string           `json:"message,omitempty"`

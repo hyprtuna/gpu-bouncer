@@ -169,14 +169,24 @@ troubleshooting.
 
 `--dry-run`, `--json` and `--verbose` are accepted before or after any command
 name. `--dry-run` is the honest preview: the daemon builds the same plan it
-would have executed, reports it, and does nothing. `request`, `release` and
-`evict` exit 1 when any action they executed failed, and with `--json` every
-response, errors included, is one JSON object on stdout.
+would have executed, reports it, and does nothing. With `--json` every
+response, errors included, is one JSON object on stdout; INSTALL.md documents
+the shapes.
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | The command did what it says. For `request` this includes not getting all the room asked for: the last line says `freed X MiB of the Y MiB asked for`, and `--json` carries `target_met`. |
+| `1` | An error, or an executed action that failed (`N of M actions failed`). |
+| `2` | No command, or an unknown command. |
 
 A claim made with `request` stands until you `release` it or the daemon
-restarts. While it stands the daemon keeps defending it, so a claim you forget
-about will keep freeing lower priority services. `gpu-bouncer status` lists
-outstanding claims.
+restarts; a second `request` for the same service updates the amount and keeps
+the claim's original place in line. While it stands the daemon keeps defending
+it, so a claim you forget about will keep freeing lower priority services.
+`gpu-bouncer status` lists outstanding claims and cooldowns.
+
 
 ## Configuration
 

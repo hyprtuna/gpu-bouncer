@@ -1096,3 +1096,37 @@ func TestStatusReportsTheLoadedConfig(t *testing.T) {
 		t.Errorf("ping daemon_config = %+v, want the loaded digest", ping.DaemonConfig)
 	}
 }
+
+// Every expired cooldown is forgotten on the next sweep, whether or not its
+// service is in the observation, so the map never holds a dead entry.
+func TestExpiredCooldownsAreSweptEvenWhenUnobserved(t *testing.T) {
+	url := (&fakeOllamaServer{}).start(t)
+	clock := &fakeClock{t: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)}
+	d := newTestDaemon(t, twoServiceConfig(url, false), &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192}}, false)
+	d.now = clock.now
+	d.mu.Lock()
+	d.cooldowns["gone"] = cooldown{until: clock.now().Add(-time.Second), reason: "old"}
+	d.cooldowns["ollama"] = cooldown{until: clock.now().Add(time.Minute), reason: "live"}
+	d.mu.Unlock()
+
+	obs := scheduler.Observation{Services: []scheduler.ServiceState{{Name: "ollama"}}}
+	d.applyCooldowns(&obs)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, still := d.cooldowns["gone"]; still {
+		t.Error("an expired cooldown for an unobserved service was kept")
+	}
+	if _, kept := d.cooldowns["ollama"]; !kept || obs.Services[0].CooldownUntil.IsZero() {
+		t.Error("a live cooldown was lost or not applied")
+	}
+}
+
+func TestElide(t *testing.T) {
+	if got := elide("short"); got != "short" {
+		t.Errorf("elide(short) = %q", got)
+	}
+	long := strings.Repeat("y", 500)
+	if got := elide(long); len(got) != 83 || !strings.HasSuffix(got, "...") {
+		t.Errorf("elide(500 chars) = %d chars, want 80 plus three dots", len(got))
+	}
+}

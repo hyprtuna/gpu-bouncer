@@ -137,6 +137,12 @@ type Plan struct {
 	Notes []string `json:"notes"`
 }
 
+// newPlan starts a plan whose lists are empty rather than absent, so they
+// serialise as [] and a consumer never has to handle null.
+func newPlan(trigger Trigger) Plan {
+	return Plan{Trigger: trigger, Actions: []Action{}, Notes: []string{}}
+}
+
 // deviceUnknownNote is the one reason every plan gives for refusing without a
 // VRAM reading, with the cause appended when the observer recorded one.
 func (o Observation) deviceUnknownNote() string {
@@ -169,7 +175,7 @@ func (p Plan) ExpectedFreeMiB() uint64 {
 // undecidable situation produces an empty plan carrying the reason in Notes,
 // because a daemon that cannot see clearly must do nothing rather than guess.
 func Decide(cfg config.Config, obs Observation) Plan {
-	plan := Plan{Trigger: TriggerNone}
+	plan := newPlan(TriggerNone)
 	if !obs.DeviceKnown {
 		plan.Notes = append(plan.Notes, obs.deviceUnknownNote())
 		return plan
@@ -404,7 +410,7 @@ func highestPriorityUp(services []ServiceState) (ServiceState, bool) {
 // priority or of how much VRAM is free. It is the operator override behind
 // `gpu-bouncer evict`, and it still refuses anything the safety rules forbid.
 func Evict(obs Observation, names []string) Plan {
-	plan := Plan{Trigger: TriggerEvict}
+	plan := newPlan(TriggerEvict)
 	if !obs.DeviceKnown {
 		// Same rule as Decide: an operator override is still an action the
 		// daemon would take on a card it cannot see, and the before and
@@ -451,13 +457,15 @@ func Evict(obs Observation, names []string) Plan {
 // named one. The kept service does not have to be running.
 func EvictAllExcept(obs Observation, keep string) Plan {
 	if _, ok := findService(obs.Services, keep); !ok {
-		plan := Plan{
-			Trigger: TriggerEvict,
-			Notes:   []string{fmt.Sprintf("refusing to evict anything: %q is not in the config, and a typo here would clear the GPU", keep)},
-		}
+		plan := newPlan(TriggerEvict)
+		plan.Notes = append(plan.Notes, fmt.Sprintf("refusing to evict anything: %q is not in the config, and a typo here would clear the GPU", keep))
 		if obs.DeviceKnown {
 			plan.CurrentFreeMiB = obs.Device.FreeMiB()
 			plan.TotalMiB = obs.Device.TotalMiB
+		} else {
+			// Both reasons to refuse are reported: fixing the name would
+			// still leave the GPU unreadable.
+			plan.Notes = append(plan.Notes, obs.deviceUnknownNote())
 		}
 		return plan
 	}
