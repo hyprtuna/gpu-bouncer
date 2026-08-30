@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -582,6 +583,63 @@ func indexOfService(services []Service, name string) int {
 
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
+// unitTypes are the unit suffixes systemd defines. A unit name must end in
+// one of them: systemd has no default, and a name without a suffix is not a
+// unit whatever else it looks like.
+var unitTypes = []string{
+	".service", ".socket", ".device", ".mount", ".automount",
+	".swap", ".target", ".path", ".timer", ".slice", ".scope",
+}
+
+// unitNameRE is the character set systemd allows in the name part of a unit,
+// plus @ for an instance and the backslash of an escaped name such as
+// dev-disk-by\x2duuid.device. It excludes control characters by
+// construction, which is the point: a unit name reaches a systemctl argument
+// and every error message about the service, and a control character is
+// invisible in both. The TOML parser decodes \e as of TOML 1.1, so a config
+// file can now put one there.
+//
+// The first character must be alphanumeric. systemd itself allows a leading
+// dash, but a unit named --user.service would be read by systemctl as an
+// option rather than as a unit, and gpu-bouncer has no business arbitrating
+// the units that spelling reaches.
+var unitNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:_.\\@-]*$`)
+
+// maxUnitName is systemd's own limit on a unit name, including the suffix.
+const maxUnitName = 255
+
+// validateUnit checks a systemd unit name before it can reach a systemctl
+// argument. gpu-bouncer only ever passes it to read only verbs and, with
+// allow_stop, to stop; refusing a name systemd could not have meant keeps a
+// typo from becoming a query about a unit nobody named.
+func validateUnit(unit string) error {
+	if len(unit) > maxUnitName {
+		return fmt.Errorf("unit is %d bytes, over systemd's %d byte limit", len(unit), maxUnitName)
+	}
+	suffix := ""
+	for _, known := range unitTypes {
+		if strings.HasSuffix(unit, known) && len(unit) > len(known) {
+			suffix = known
+			break
+		}
+	}
+	if suffix == "" {
+		return fmt.Errorf("unit %s must end in a unit type: %s", printable(unit), strings.Join(unitTypes, ", "))
+	}
+	if name := strings.TrimSuffix(unit, suffix); !unitNameRE.MatchString(name) {
+		return fmt.Errorf("unit %s must match %s before its %s suffix", printable(unit), unitNameRE, suffix)
+	}
+	return nil
+}
+
+// printable renders a value for an error message, quoted, with anything
+// unprintable escaped, so that a control character in a config file is
+// visible in the message that refuses it rather than silently absent from it
+// and leaving an error that names a unit indistinguishable from the legal one.
+func printable(s string) string {
+	return strconv.QuoteToASCII(s)
+}
+
 // Validate checks a merged config and fills in per-service defaults. It is
 // exported so that tests and `gpu-bouncer plan` can validate a hand-built
 // config without touching the filesystem.
@@ -639,6 +697,9 @@ func Validate(cfg *Config) error {
 			}
 			if svc.Endpoint != "" {
 				return fmt.Errorf("service %q: adapter %q does not take an endpoint", svc.Name, svc.Adapter)
+			}
+			if err := validateUnit(svc.Unit); err != nil {
+				return fmt.Errorf("service %q: %w", svc.Name, err)
 			}
 		}
 		svc.Endpoint = strings.TrimRight(svc.Endpoint, "/")
