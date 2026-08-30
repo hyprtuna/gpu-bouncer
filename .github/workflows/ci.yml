@@ -21,9 +21,9 @@ jobs:
     name: gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.24'
           check-latest: true
@@ -45,7 +45,12 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # setup-go v6 and later pin GOTOOLCHAIN=local, which keeps the build
+      # and the tests on the go.mod floor. staticcheck itself needs a newer
+      # Go, so its install alone may fetch one.
       - name: staticcheck
+        env:
+          GOTOOLCHAIN: auto
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
           "$(go env GOPATH)/bin/staticcheck" ./...
@@ -62,6 +67,16 @@ jobs:
 
       - name: test
         run: go test -race ./...
+
+      # The release job depends on this script; a tag whose CHANGELOG section
+      # is missing must fail here, on the PR, not at publish time.
+      - name: release notes script
+        run: |
+          .github/scripts/release-notes.sh "v$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | tr -d '#[] ')" CHANGELOG.md >/dev/null
+          if .github/scripts/release-notes.sh v0.0.0 CHANGELOG.md >/dev/null 2>&1; then
+            echo "release-notes.sh accepted a version the CHANGELOG does not have"
+            exit 1
+          fi
 
       - name: no em or en dashes
         run: |
