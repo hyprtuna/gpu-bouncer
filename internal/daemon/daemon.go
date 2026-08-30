@@ -571,10 +571,11 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request, send func(ipc.Resp
 // an edit has taken effect.
 func (d *Daemon) configReport() *ipc.ConfigReport {
 	return &ipc.ConfigReport{
-		Path:     strings.Join(d.cfg.Sources, ", "),
-		Paths:    d.cfg.Sources,
-		SHA256:   d.cfg.Hash,
-		LoadedAt: d.cfg.LoadedAt,
+		Path:         strings.Join(d.cfg.Sources, ", "),
+		Paths:        d.cfg.Sources,
+		SHA256:       d.cfg.Hash,
+		DigestRecipe: config.DigestRecipe,
+		LoadedAt:     d.cfg.LoadedAt,
 	}
 }
 

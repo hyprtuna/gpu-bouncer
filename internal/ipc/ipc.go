@@ -200,8 +200,13 @@ type ConfigReport struct {
 	// SHA256 is a digest over the contents of those files, in load order,
 	// and nothing else. A client recomputes it over the same paths with
 	// config.ContentDigest.
-	SHA256   string    `json:"sha256"`
-	LoadedAt time.Time `json:"loaded_at"`
+	SHA256 string `json:"sha256"`
+	// DigestRecipe names how SHA256 was computed, config.DigestRecipe for a
+	// daemon of this release. It is empty from one too old to send it, whose
+	// digest covered the paths as well and can never match a digest taken
+	// this way. A client compares only a recipe it implements.
+	DigestRecipe string    `json:"digest_recipe"`
+	LoadedAt     time.Time `json:"loaded_at"`
 }
 
 // CooldownReport is one service that reactive plans are leaving alone until

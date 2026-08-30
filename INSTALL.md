@@ -266,10 +266,19 @@ a different configuration, not at a stale daemon, and is never told to
 restart one. A system daemon plus a per user client overlay is a supported
 setup for exactly that reason.
 
+The daemon also reports **how** it took that digest, as `digest_recipe`.
+`status` compares digests only when it can reproduce the recipe, because two
+recipes disagreeing says nothing about the files: releases up to 0.1.2 folded
+the paths into the hash, so a client of this release and a daemon of that one
+can never agree, and reading that as an edit reported a file nobody had
+touched as stale on every `status` until the daemon was restarted. A recipe
+this client does not implement leaves the answer unknown and says so.
+
 `--json status` carries the answer in `config_stale` next to `daemon_config`,
-which holds the joined path, the list of paths, the digest and the load time.
-`config_stale` is `null` when the answer is not known: no daemon answered,
-the daemon is too old to report what it loaded, or one of the files it loaded
+which holds the joined path, the list of paths, the digest, the recipe and
+the load time. `config_stale` is `null` when the answer is not known: no
+daemon answered, the daemon is too old to report what it loaded, it reports a
+digest recipe this client does not implement, or one of the files it loaded
 cannot be read now. A daemon that loaded no file at all says so instead:
 
 ```
@@ -401,8 +410,8 @@ the key.
 | `cooldowns` | list | services the daemon's loop is leaving alone: `service`, `until`, `reason`; empty without a daemon |
 | `daemon_running` | bool | whether a daemon answered |
 | `daemon_dry_run` | bool or null | whether that daemon plans and never acts; null when no daemon answered, or when the one that did is older than this client and does not report it |
-| `daemon_config` | object or null | what the daemon loaded: `path` (joined), `paths` (the list), `sha256` (over their contents), `loaded_at`; null without a daemon |
-| `config_stale` | bool or null | true when the files the daemon loaded have changed since it loaded them; null when that is not known |
+| `daemon_config` | object or null | what the daemon loaded: `path` (joined), `paths` (the list), `sha256` (over their contents), `digest_recipe` (how that digest was taken, `content-v1` for this release, empty from a daemon older than the field), `loaded_at`; null without a daemon |
+| `config_stale` | bool or null | true when the files the daemon loaded have changed since it loaded them; null when that is not known, which includes a daemon whose `digest_recipe` this client does not implement |
 | `config` | string or null | the file(s) this command read; null when none was found |
 
 `plan`: `{"ok": true, "plan": {...}}` where `plan` has `trigger`,
