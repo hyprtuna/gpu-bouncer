@@ -10,6 +10,10 @@ set -euo pipefail
 
 tag=${1:?usage: release-notes.sh vX.Y.Z [CHANGELOG.md]}
 changelog=${2:-CHANGELOG.md}
+# Only a lowercase v is stripped. An uppercase "V1.2.3" therefore keeps its V,
+# never matches a section heading, and is refused by the comparison below.
+# That is the right answer reached indirectly: every tag in this repository is
+# lowercase, so there is nothing to gain from accepting the other spelling.
 version=${tag#v}
 
 if [ ! -f "$changelog" ]; then
@@ -17,10 +21,16 @@ if [ ! -f "$changelog" ]; then
   exit 1
 fi
 
+# Carriage returns are removed once, up front. A CHANGELOG saved with CRLF
+# line endings otherwise puts a \r at the end of every published line, and
+# defeats every emptiness check below, because a line holding one carriage
+# return is not an empty line.
+body=$(tr -d '\r' < "$changelog")
+
 # A released heading is "## [<semver>]", where semver may carry a pre-release
 # or build suffix. "## [Unreleased]" is not one.
 heading='^## \[[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?\]'
-top=$(grep -m1 -oE "$heading" "$changelog" | sed -e 's/^## \[//' -e 's/\]$//' || true)
+top=$(printf '%s\n' "$body" | grep -m1 -oE "$heading" | sed -e 's/^## \[//' -e 's/\]$//' || true)
 if [ -z "$top" ]; then
   echo "release-notes: $changelog has no released section" >&2
   exit 1
@@ -29,20 +39,38 @@ if [ "$top" != "$version" ]; then
   echo "release-notes: the top released section of $changelog is $top, but the tag is $tag" >&2
   exit 1
 fi
-count=$(grep -cF -- "## [$version]" "$changelog" || true)
+
+# Headings are counted where they are headings: at the start of a line and
+# outside a fenced code block. Counting the string anywhere on a line made a
+# release note that quotes its own heading in prose look like a second copy
+# of the section, which blocked a legitimate release.
+count=$(printf '%s\n' "$body" | awk -v v="$version" '
+  /^(```|~~~)/ { fence = !fence; next }
+  !fence && index($0, "## [" v "]") == 1 { n++ }
+  END { print n + 0 }
+')
 if [ "$count" -ne 1 ]; then
   echo "release-notes: $changelog has $count sections headed [$version], want exactly one" >&2
   exit 1
 fi
 
 # Everything between the section heading and the next heading or the link
-# definitions at the end of the file, minus leading and trailing blank lines.
-notes=$(awk -v v="$version" '
-  on && (/^## \[/ || /^\[[^]]+\]: /) { exit }
-  index($0, "## [" v "]") == 1 { on = 1; next }
+# definitions at the end of the file. A fenced code block inside the section
+# is content: a "## [" or a "[x]: url" line inside one is an example, not the
+# end of the section, and treating it as the end silently truncated the notes.
+notes=$(printf '%s\n' "$body" | awk -v v="$version" '
+  /^(```|~~~)/ { fence = !fence; if (on) print; next }
+  !fence && on && (/^## \[/ || /^\[[^]]+\]: /) { exit }
+  !fence && index($0, "## [" v "]") == 1 { on = 1; next }
   on { print }
-' "$changelog")
-notes=$(printf '%s\n' "$notes" | sed -e '/./,$!d')
+')
+
+# Trim blank lines from both ends, where a line of only spaces or tabs is
+# blank. A section holding nothing but whitespace was published as whitespace.
+notes=$(printf '%s\n' "$notes" | awk '
+  { line[NR] = $0; if ($0 ~ /[^[:space:]]/) { if (!first) first = NR; last = NR } }
+  END { for (i = first; i <= last; i++) print line[i] }
+')
 if [ -z "$notes" ]; then
   echo "release-notes: the $version section of $changelog is empty" >&2
   exit 1
