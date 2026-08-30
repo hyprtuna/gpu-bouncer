@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `github.com/BurntSushi/toml` from 1.5.0 to 1.6.0, which accepts TOML 1.1
+  syntax that every earlier release refuses, such as a multi-line inline table
+  or a trailing comma in one. A config file written for this release may
+  therefore not load on 0.1.2 or older. README's Configuration section states
+  the level.
+
+### Fixed
+
+- **A systemd `unit` was never validated.** toml 1.6.0 also decodes `\e`, so a
+  config file could put an escape character into a unit name, where it reached
+  a `systemctl` argument and every error message about the service invisibly. A
+  unit must now be a systemd unit name: a known type suffix, systemd's own
+  character set before it, a letter or digit first so it can never be read as
+  an option, and within systemd's 255 byte limit. A refusal shows any control
+  character escaped rather than printing it.
+
 ## [0.1.2] - 2026-08-30
 
 A second fix round. As before, an existing config file keeps loading: the

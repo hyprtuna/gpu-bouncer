@@ -194,6 +194,10 @@ stale.
 
 ## Configuration
 
+Configuration is TOML 1.1 as of 0.1.3. A file that uses 1.1 syntax, such as a
+multi-line inline table or a trailing comma in one, does not load on 0.1.2 or
+older, so keep to 1.0 syntax if the same file has to serve both.
+
 Two files are read, in order, and the second is layered on top of the first per
 key, so a user file can retune one service without restating it:
 
@@ -230,7 +234,7 @@ one is a wrong type, not a zero.
 | `name` | required | How you refer to it on the command line. |
 | `adapter` | required | `ollama`, `comfyui`, `llama-swap` or `systemd-unit`. |
 | `endpoint` | required for HTTP adapters | Base URL, for example `http://127.0.0.1:11434`. |
-| `unit` | required for `systemd-unit` | The unit name. |
+| `unit` | required for `systemd-unit` | The unit name: a systemd unit name ending in a known type (`.service`, `.timer`, `.mount` and the rest), starting with a letter or digit, and holding no control characters. |
 | `user_unit` | `false` | Use `systemctl --user`. |
 | `priority` | `0` | Higher wins. Equal priority never evicts. |
 | `allow_stop` | `false` | Required before any process level action. |
