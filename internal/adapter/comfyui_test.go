@@ -99,7 +99,7 @@ func newTestComfyUI(t *testing.T, base string, timeout time.Duration) *comfyUIAd
 		Adapter:  config.AdapterComfyUI,
 		Endpoint: base,
 		Timeout:  config.Duration(timeout),
-	})
+	}, 0)
 }
 
 // A realistic /api/system_stats body, trimmed to the fields the adapter reads
@@ -616,5 +616,56 @@ func TestComfyUIUsesAPIPrefixedRoutes(t *testing.T) {
 		if paths[i] != want[i] {
 			t.Errorf("request %d = %q, want %q", i, paths[i], want[i])
 		}
+	}
+}
+
+// The held figure must come from the arbitrated device. With policy.gpu_index
+// = 1 the adapter reads torch device 1, not device 0, so that free VRAM (from
+// the driver, for GPU 1) and held VRAM (from ComfyUI) describe the same card.
+func TestComfyUIHonoursGPUIndex(t *testing.T) {
+	const twoDevices = `{
+	  "system": {"comfyui_version": "0.34.0"},
+	  "devices": [
+	    {"name": "cuda:0 first", "type": "cuda", "index": 0,
+	     "torch_vram_total": 1073741824, "torch_vram_free": 0},
+	    {"name": "cuda:1 second", "type": "cuda", "index": 1,
+	     "torch_vram_total": 8589934592, "torch_vram_free": 0}
+	  ]
+	}`
+	fake := &comfyFake{
+		systemStats: jsonHandler(twoDevices),
+		prompt:      jsonHandler(`{"exec_info":{"queue_remaining":0}}`),
+	}
+	base := fake.start(t)
+
+	for _, tt := range []struct {
+		index    int
+		wantHeld uint64
+		wantItem string
+	}{
+		{0, 1024, "cuda:0 first"},
+		{1, 8192, "cuda:1 second"},
+	} {
+		a := newComfyUI(config.Service{Name: "comfy", Adapter: config.AdapterComfyUI, Endpoint: base, Timeout: config.Duration(time.Second)}, tt.index)
+		status, err := a.Probe(context.Background())
+		if err != nil {
+			t.Fatalf("index %d: Probe: %v", tt.index, err)
+		}
+		if status.HeldMiB != tt.wantHeld {
+			t.Errorf("index %d: HeldMiB = %d, want %d", tt.index, status.HeldMiB, tt.wantHeld)
+		}
+		if len(status.Items) != 1 || status.Items[0].Name != tt.wantItem {
+			t.Errorf("index %d: Items = %+v, want %s", tt.index, status.Items, tt.wantItem)
+		}
+	}
+
+	// And through the public constructor, which is what the observer calls.
+	a, err := New(config.Service{Name: "comfy", Adapter: config.AdapterComfyUI, Endpoint: base, Timeout: config.Duration(time.Second)}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := a.Probe(context.Background())
+	if err != nil || status.HeldMiB != 8192 {
+		t.Errorf("New(..., 1).Probe = %+v, %v; want 8192 MiB held", status, err)
 	}
 }

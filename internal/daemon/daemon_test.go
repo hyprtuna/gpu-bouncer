@@ -59,9 +59,11 @@ func (f *fakeGPU) setFail(fail bool) {
 	f.fail = fail
 }
 
-// fakeOllamaServer is enough of Ollama to drive one release.
+// fakeOllamaServer is enough of Ollama to drive one release. With sticky set
+// the model never leaves /api/ps, however many unloads are accepted.
 type fakeOllamaServer struct {
 	loaded    atomic.Bool
+	sticky    bool
 	unloadHit atomic.Int32
 	onUnload  func()
 }
@@ -82,7 +84,9 @@ func (f *fakeOllamaServer) start(t *testing.T) string {
 	})
 	mux.HandleFunc("/api/generate", func(w http.ResponseWriter, r *http.Request) {
 		f.unloadHit.Add(1)
-		f.loaded.Store(false)
+		if !f.sticky {
+			f.loaded.Store(false)
+		}
 		if f.onUnload != nil {
 			f.onUnload()
 		}
@@ -549,5 +553,36 @@ func TestListenRejectsAnOverlongPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "over the") || !strings.Contains(err.Error(), "byte limit") {
 		t.Errorf("error = %q, want it to explain the length limit", err)
+	}
+}
+
+// A model that never leaves /api/ps is a failed release, bounded by the
+// service's drain_timeout, so a stuck service cannot block the loop for the
+// old hardcoded 30 seconds and cannot be reported as freed.
+func TestDaemonDrainTimeoutIsAFailedAction(t *testing.T) {
+	fakeOllama := &fakeOllamaServer{sticky: true}
+	fakeOllama.loaded.Store(true)
+	url := fakeOllama.start(t)
+	hardware := &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 5200}}
+
+	cfg := twoServiceConfig(url, false)
+	cfg.Services[1].DrainTimeout = config.Duration(time.Second)
+	testDaemon(t, cfg, hardware, false)
+
+	start := time.Now()
+	resp := call(t, ipc.Request{Op: ipc.OpEvict, Service: "ollama"})
+	elapsed := time.Since(start)
+	if elapsed >= 2*time.Second {
+		t.Errorf("evict took %s, want under 2s with drain_timeout = 1s", elapsed)
+	}
+	if len(resp.Executed) != 1 {
+		t.Fatalf("executed %+v, want one action", resp.Executed)
+	}
+	action := resp.Executed[0]
+	if action.Acted {
+		t.Error("Acted = true for a model that never drained")
+	}
+	if !strings.Contains(action.Error, "still loaded after 1s") {
+		t.Errorf("Error = %q, want still loaded after 1s", action.Error)
 	}
 }

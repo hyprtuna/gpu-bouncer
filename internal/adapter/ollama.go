@@ -44,7 +44,8 @@ type ollamaAdapter struct {
 	client  *http.Client
 
 	// drainInterval and drainTimeout bound the wait for an unloaded model to
-	// leave /api/ps. Fields rather than constants so tests need not sleep.
+	// leave /api/ps. drainTimeout is the service's drain_timeout; the
+	// interval is a field so tests need not sleep.
 	drainInterval time.Duration
 	drainTimeout  time.Duration
 }
@@ -56,7 +57,7 @@ func newOllama(svc config.Service) *ollamaAdapter {
 		timeout:       svc.Timeout.D(),
 		client:        newHTTPClient(),
 		drainInterval: 250 * time.Millisecond,
-		drainTimeout:  30 * time.Second,
+		drainTimeout:  svc.DrainTimeout.D(),
 	}
 }
 
@@ -172,8 +173,13 @@ func (a *ollamaAdapter) Release(ctx context.Context) (Result, error) {
 	case err != nil:
 		return result, fmt.Errorf("%s: %w", a.name, err)
 	case !drained:
-		result.Detail = fmt.Sprintf("unloaded %s, but they were still listed after %s",
-			strings.Join(result.Targets, ", "), a.drainTimeout)
+		// The unload was accepted but did not happen within drain_timeout,
+		// so the VRAM is not back. That is a failed action, not a success
+		// with a caveat: a caller that reads only Acted must not be told the
+		// memory was freed.
+		result.Acted = false
+		result.Detail = "asked Ollama to expire " + strings.Join(result.Targets, ", ")
+		return result, fmt.Errorf("%s: still loaded after %s: %s", a.name, a.drainTimeout, strings.Join(result.Targets, ", "))
 	default:
 		result.Detail = "unloaded " + strings.Join(result.Targets, ", ")
 	}

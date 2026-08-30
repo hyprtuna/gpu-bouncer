@@ -39,6 +39,9 @@ priority = 50
 # Ollama is released by asking it to expire its loaded models, which needs no
 # extra permission. allow_stop is only consulted for systemd-unit services.
 timeout = "5s"
+# How long a release waits for the models to leave "ollama ps" before it is
+# reported as a failed action. Ollama frees VRAM some time after it agrees to.
+drain_timeout = "30s"
 
 [[service]]
 name = "comfyui"
