@@ -304,10 +304,10 @@ func TestDaemonRefusesUnconfiguredService(t *testing.T) {
 				t.Errorf("%s for an unconfigured service succeeded, want an error", req.Op)
 			}
 		case ipc.OpEvict:
-			// Evict answers with an empty plan explaining the refusal rather
-			// than an error, so the operator sees why.
-			if resp.Plan == nil || len(resp.Plan.Actions) != 0 {
-				t.Errorf("%s produced actions for an unconfigured service: %+v", req.Op, resp.Plan)
+			// A typo in a service name has to be visible to a script, so
+			// evict answers with an error rather than an empty plan.
+			if resp.Error == "" {
+				t.Errorf("%s for an unconfigured service succeeded, want an error", req.Op)
 			}
 			if len(resp.Executed) != 0 {
 				t.Errorf("%s executed %+v, want nothing", req.Op, resp.Executed)
