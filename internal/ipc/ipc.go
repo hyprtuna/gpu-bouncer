@@ -1,0 +1,345 @@
+// Package ipc carries commands between the gpu-bouncer CLI and the daemon.
+//
+// The transport is a Unix stream socket speaking one JSON request and one JSON
+// response per connection. It is deliberately unexciting: the daemon is the
+// only thing permitted to change a service's state, so the interesting part of
+// this package is who is allowed to connect, not what is said.
+//
+// The socket is created with mode 0660 and is owned by whichever user runs the
+// daemon. A user unit therefore gets a socket only that user can drive, which
+// is the intended desktop setup. A system unit gets a root owned socket, and
+// commands that mutate state need matching privileges.
+package ipc
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/hyprtuna/gpu-bouncer/internal/scheduler"
+)
+
+// Op is a command name.
+type Op string
+
+const (
+	// OpPing checks that a daemon is listening.
+	OpPing Op = "ping"
+	// OpStatus returns the daemon's view of the GPU and every service.
+	OpStatus Op = "status"
+	// OpPlan returns what the daemon would do right now, without doing it.
+	OpPlan Op = "plan"
+	// OpRequest records a priority claim and acts on it.
+	OpRequest Op = "request"
+	// OpRelease drops a claim previously made with OpRequest.
+	OpRelease Op = "release"
+	// OpEvict frees named services now.
+	OpEvict Op = "evict"
+)
+
+// Request is one command.
+type Request struct {
+	Op Op `json:"op"`
+	// Service is the subject of request, release and evict.
+	Service string `json:"service,omitempty"`
+	// NeedMiB is how much free VRAM a request wants. Zero means the policy
+	// floor.
+	NeedMiB uint64 `json:"need_mib,omitempty"`
+	// AllExcept turns evict into "evict everything but Service".
+	AllExcept bool `json:"all_except,omitempty"`
+	// DryRun asks the daemon to plan and report without acting.
+	DryRun bool `json:"dry_run,omitempty"`
+}
+
+// ActionResult is what actually happened to one service, with the measured
+// VRAM either side. The before and after figures come from the GPU rather than
+// from the service, because a service reporting that it unloaded something is
+// not evidence that the memory came back.
+type ActionResult struct {
+	Service       string `json:"service"`
+	Verb          string `json:"verb"`
+	Reason        string `json:"reason,omitempty"`
+	Acted         bool   `json:"acted"`
+	Detail        string `json:"detail,omitempty"`
+	Error         string `json:"error,omitempty"`
+	FreeBeforeMiB uint64 `json:"free_before_mib"`
+	FreeAfterMiB  uint64 `json:"free_after_mib"`
+}
+
+// GPUReport is the arbitrated device as the daemon last read it.
+type GPUReport struct {
+	Known    bool   `json:"known"`
+	Index    int    `json:"index"`
+	Name     string `json:"name,omitempty"`
+	Source   string `json:"source,omitempty"`
+	TotalMiB uint64 `json:"total_mib"`
+	UsedMiB  uint64 `json:"used_mib"`
+	FreeMiB  uint64 `json:"free_mib"`
+}
+
+// ServiceReport is one service as the daemon last saw it.
+type ServiceReport struct {
+	Name          string   `json:"name"`
+	Adapter       string   `json:"adapter"`
+	Priority      int      `json:"priority"`
+	Up            bool     `json:"up"`
+	Version       string   `json:"version,omitempty"`
+	Items         []string `json:"items,omitempty"`
+	HeldMiB       uint64   `json:"held_mib"`
+	HeldEstimated bool     `json:"held_estimated"`
+	Idle          bool     `json:"idle"`
+	IdleKnown     bool     `json:"idle_known"`
+	AllowStop     bool     `json:"allow_stop"`
+	Error         string   `json:"error,omitempty"`
+}
+
+// Response is one answer. OK is false whenever Error is set.
+type Response struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+
+	GPU      *GPUReport      `json:"gpu,omitempty"`
+	Services []ServiceReport `json:"services,omitempty"`
+	Plan     *scheduler.Plan `json:"plan,omitempty"`
+	Executed []ActionResult  `json:"executed,omitempty"`
+	Claims   []ClaimReport   `json:"claims,omitempty"`
+	Message  string          `json:"message,omitempty"`
+}
+
+// ClaimReport is one outstanding claim.
+type ClaimReport struct {
+	Service string    `json:"service"`
+	NeedMiB uint64    `json:"need_mib"`
+	At      time.Time `json:"at"`
+}
+
+// Claims converts reports back into scheduler claims.
+func Claims(reports []ClaimReport) []scheduler.Claim {
+	out := make([]scheduler.Claim, 0, len(reports))
+	for _, r := range reports {
+		out = append(out, scheduler.Claim{Service: r.Service, NeedMiB: r.NeedMiB, At: r.At})
+	}
+	return out
+}
+
+const (
+	// EnvSocket overrides socket discovery. Used by the integration tests.
+	EnvSocket = "GPU_BOUNCER_SOCKET"
+
+	systemSocket = "/run/gpu-bouncer/gpu-bouncer.sock"
+	socketName   = "gpu-bouncer.sock"
+
+	// socketMode keeps the socket private to the user running the daemon.
+	socketMode = 0o660
+
+	// maxRequest caps a single request. The protocol has no large payloads,
+	// so anything bigger is a client bug or an attempt to exhaust memory.
+	maxRequest = 1 << 20
+)
+
+// SocketPath returns the socket to use. A user session prefers its own runtime
+// directory, so an unprivileged daemon works with no setup at all.
+func SocketPath() string {
+	if override := os.Getenv(EnvSocket); override != "" {
+		return override
+	}
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+		return filepath.Join(dir, socketName)
+	}
+	return systemSocket
+}
+
+// SearchPaths lists the sockets a client will try, in order. A user socket
+// wins over the system one, matching the config layering.
+func SearchPaths() []string {
+	if override := os.Getenv(EnvSocket); override != "" {
+		return []string{override}
+	}
+	var paths []string
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+		paths = append(paths, filepath.Join(dir, socketName))
+	}
+	return append(paths, systemSocket)
+}
+
+// ErrNoDaemon means nothing was listening on any candidate socket.
+var ErrNoDaemon = errors.New("no gpu-bouncer daemon is listening")
+
+// Do sends one request to the first daemon that answers and returns its reply.
+func Do(ctx context.Context, req Request) (Response, error) {
+	var lastErr error
+	for _, path := range SearchPaths() {
+		resp, err := doAt(ctx, path, req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = ErrNoDaemon
+	}
+	return Response{}, fmt.Errorf("%w (tried %v): %v", ErrNoDaemon, SearchPaths(), lastErr)
+}
+
+func doAt(ctx context.Context, path string, req Request) (Response, error) {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "unix", path)
+	if err != nil {
+		return Response{}, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+	}
+
+	encoded, err := json.Marshal(req)
+	if err != nil {
+		return Response{}, fmt.Errorf("encode request: %w", err)
+	}
+	if _, err := conn.Write(append(encoded, '\n')); err != nil {
+		return Response{}, fmt.Errorf("send request: %w", err)
+	}
+
+	reader := bufio.NewReaderSize(conn, 64*1024)
+	line, err := readLine(reader, maxRequest)
+	if err != nil {
+		return Response{}, fmt.Errorf("read response: %w", err)
+	}
+	var resp Response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return Response{}, fmt.Errorf("decode response: %w", err)
+	}
+	return resp, nil
+}
+
+// Handler answers one request.
+type Handler func(ctx context.Context, req Request) Response
+
+// Listener owns a Unix socket and serves requests until its context ends.
+type Listener struct {
+	path     string
+	listener net.Listener
+}
+
+// Listen binds the socket, replacing a stale one left by a crashed daemon.
+// A socket that something is still listening on is never removed: that would
+// silently steal control from a running daemon.
+func Listen(path string) (*Listener, error) {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create socket directory %s: %w", dir, err)
+		}
+	}
+
+	if _, err := os.Stat(path); err == nil {
+		conn, dialErr := net.DialTimeout("unix", path, time.Second)
+		if dialErr == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("another gpu-bouncer daemon is already listening on %s", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("remove stale socket %s: %w", path, err)
+		}
+	}
+
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", path, err)
+	}
+	if err := os.Chmod(path, socketMode); err != nil {
+		_ = ln.Close()
+		return nil, fmt.Errorf("set permissions on %s: %w", path, err)
+	}
+	return &Listener{path: path, listener: ln}, nil
+}
+
+// Path is the socket this listener owns.
+func (l *Listener) Path() string { return l.path }
+
+// Close stops listening and removes the socket file.
+func (l *Listener) Close() error {
+	err := l.listener.Close()
+	_ = os.Remove(l.path)
+	return err
+}
+
+// Serve accepts connections until ctx is cancelled or Close is called. Each
+// connection is handled on its own goroutine, so one slow client cannot block
+// the rest.
+func (l *Listener) Serve(ctx context.Context, handle Handler) error {
+	go func() {
+		<-ctx.Done()
+		_ = l.listener.Close()
+	}()
+
+	for {
+		conn, err := l.listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			// A transient accept failure should not kill the daemon, but a
+			// permanently closed listener should.
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return fmt.Errorf("accept: %w", err)
+		}
+		go serveConn(ctx, conn, handle)
+	}
+}
+
+func serveConn(ctx context.Context, conn net.Conn, handle Handler) {
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
+
+	reader := bufio.NewReaderSize(conn, 64*1024)
+	line, err := readLine(reader, maxRequest)
+	if err != nil {
+		writeResponse(conn, Response{Error: "read request: " + err.Error()})
+		return
+	}
+	var req Request
+	if err := json.Unmarshal(line, &req); err != nil {
+		writeResponse(conn, Response{Error: "decode request: " + err.Error()})
+		return
+	}
+	writeResponse(conn, handle(ctx, req))
+}
+
+func writeResponse(conn net.Conn, resp Response) {
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		// The response could not be encoded, so send a minimal valid one
+		// rather than letting the client hang waiting for a line.
+		encoded = []byte(`{"ok":false,"error":"the daemon could not encode its response"}`)
+	}
+	_, _ = conn.Write(append(encoded, '\n'))
+}
+
+// readLine reads one newline terminated message, refusing anything over limit.
+func readLine(reader *bufio.Reader, limit int) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, isPrefix, err := reader.ReadLine()
+		if err != nil {
+			return nil, err
+		}
+		buf = append(buf, chunk...)
+		if len(buf) > limit {
+			return nil, fmt.Errorf("message exceeds %d bytes", limit)
+		}
+		if !isPrefix {
+			return buf, nil
+		}
+	}
+}
