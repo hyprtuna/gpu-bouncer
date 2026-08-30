@@ -463,6 +463,19 @@ Either run the state changing commands with `sudo`, or switch to the user unit
 so the daemon runs as you. Do not loosen the socket's mode: anything that can
 open it can ask the daemon to unload your models.
 
+### A service behind a reverse proxy reads as down with a redirect error
+
+```
+comfyui          comfyui       priority 20   down
+  error: comfyui: GET http://127.0.0.1:8188/api/system_stats: HTTP 302 redirect to https://127.0.0.1:8188/api/system_stats refused: gpu-bouncer only talks to the endpoint the config names
+```
+
+A reverse proxy that answers `http` with a redirect to `https` makes a
+working service read as `down`, by design: gpu-bouncer never follows a
+redirect, because a 3xx would send the request, and trust the answer, of a
+host or scheme the config never named. Point `endpoint` at the URL the
+service actually answers on, here the `https` one.
+
 ### When status says the source is sysfs
 
 ```

@@ -280,7 +280,9 @@ in the code. Each has real limits, listed here rather than discovered later.
 - No process level action without `allow_stop = true` on that service. The
   check is enforced in the scheduler, again in the daemon, and again in the
   adapter before it execs anything.
-- On any adapter error, gpu-bouncer does nothing, reports, and exits 1.
+- On any adapter error, gpu-bouncer does nothing and reports. `request`,
+  `release` and `evict` then exit 1; `status` and `plan` show the error next
+  to the service and exit 0, because observing is not acting.
 - The HTTP adapters never follow a redirect and never send credentials in a
   URL: a 3xx is an error naming where the service tried to send them, and an
   endpoint with a password in it is refused at config time.
