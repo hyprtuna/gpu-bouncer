@@ -185,9 +185,24 @@ func newTestDaemon(t *testing.T, cfg config.Config, source gpu.Source, dryRun bo
 	return d
 }
 
+// shortDir is a temporary directory for a Unix socket. t.TempDir folds the
+// test's name and TMPDIR into its path, and a socket path is capped at 107
+// bytes, so a long subtest name on a machine with a long TMPDIR produces a
+// socket that cannot be bound and a daemon that never answers. This keeps
+// the path short whatever the test is called.
+func shortDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func startDaemon(t *testing.T, d *Daemon) string {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "gpu-bouncer.sock")
+	socket := filepath.Join(shortDir(t), "gpu-bouncer.sock")
 	t.Setenv(ipc.EnvSocket, socket)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -468,7 +483,7 @@ func runRefusal(t *testing.T, cfg config.Config, source gpu.Source) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return d.Run(ctx, filepath.Join(t.TempDir(), "gpu-bouncer.sock"))
+	return d.Run(ctx, filepath.Join(shortDir(t), "gpu-bouncer.sock"))
 }
 
 // A hybrid laptop seen through sysfs: the NVIDIA card is index 0 and has no
@@ -546,7 +561,7 @@ func TestDaemonRejectsUnknownOperation(t *testing.T) {
 
 // Two daemons must not share one socket, or the second silently steals control.
 func TestListenRefusesASecondDaemon(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "gpu-bouncer.sock")
+	socket := filepath.Join(shortDir(t), "gpu-bouncer.sock")
 	t.Setenv(ipc.EnvSocket, socket)
 	first, err := ipc.Listen(socket)
 	if err != nil {
@@ -570,7 +585,7 @@ func TestListenRefusesASecondDaemon(t *testing.T) {
 
 // A socket left behind by a crashed daemon must not block a restart.
 func TestListenReplacesStaleSocket(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "gpu-bouncer.sock")
+	socket := filepath.Join(shortDir(t), "gpu-bouncer.sock")
 	first, err := ipc.Listen(socket)
 	if err != nil {
 		t.Fatalf("first Listen: %v", err)
@@ -1021,7 +1036,7 @@ func TestShutdownDuringDrainIsPrompt(t *testing.T) {
 		},
 	}
 	d := newTestDaemon(t, cfg, &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 5200}}, false)
-	socket := filepath.Join(t.TempDir(), "gpu-bouncer.sock")
+	socket := filepath.Join(shortDir(t), "gpu-bouncer.sock")
 	t.Setenv(ipc.EnvSocket, socket)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

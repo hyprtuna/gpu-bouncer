@@ -15,7 +15,7 @@ import (
 // reports the mode bind(2) itself produced; if a window existed, that is the
 // mode it would have during the window.
 func TestListenCreatesSocketAt0660UnderUmaskZero(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "gb.sock")
+	socket := filepath.Join(shortDir(t), "gb.sock")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestListenHelperProcess$")
 	cmd.Env = append(os.Environ(), "GPU_BOUNCER_LISTEN_HELPER="+socket)
 	out, err := cmd.CombinedOutput()
@@ -67,7 +67,7 @@ func TestListenHelperProcess(t *testing.T) {
 // The ordinary case, under the test process's own umask: the final mode is
 // 0660 and the umask is restored.
 func TestListenSocketMode(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "gb.sock")
+	socket := filepath.Join(shortDir(t), "gb.sock")
 	before := syscall.Umask(0o022)
 	syscall.Umask(before)
 

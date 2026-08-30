@@ -538,6 +538,7 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request, send func(ipc.Resp
 func (d *Daemon) configReport() *ipc.ConfigReport {
 	return &ipc.ConfigReport{
 		Path:     strings.Join(d.cfg.Sources, ", "),
+		Paths:    d.cfg.Sources,
 		SHA256:   d.cfg.Hash,
 		LoadedAt: d.cfg.LoadedAt,
 	}

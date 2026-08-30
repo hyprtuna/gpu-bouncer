@@ -23,7 +23,10 @@ type statusOutput struct {
 	DaemonRunning bool                 `json:"daemon_running"`
 	DaemonDryRun  bool                 `json:"daemon_dry_run"`
 	DaemonConfig  *ipc.ConfigReport    `json:"daemon_config"`
-	ConfigStale   bool                 `json:"config_stale"`
+	// ConfigStale is null when the answer is not known: no daemon answered,
+	// the daemon is too old to report what it loaded, or one of the files it
+	// loaded cannot be read now.
+	ConfigStale *bool `json:"config_stale"`
 	// Config is the path the configuration came from, or null when no file
 	// was found.
 	Config *string `json:"config"`
@@ -91,9 +94,7 @@ func statusOutputOf(r ipc.Response) statusOutput {
 	if r.DaemonDryRun != nil {
 		out.DaemonDryRun = *r.DaemonDryRun
 	}
-	if r.ConfigStale != nil {
-		out.ConfigStale = *r.ConfigStale
-	}
+	out.ConfigStale = r.ConfigStale
 	if len(r.Config) > 0 && string(r.Config) != "null" {
 		var path string
 		if err := json.Unmarshal(r.Config, &path); err == nil {

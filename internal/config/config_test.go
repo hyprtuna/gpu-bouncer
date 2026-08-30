@@ -320,3 +320,74 @@ func TestLoadExplicitMissingFileErrors(t *testing.T) {
 		t.Fatal("Load accepted a missing explicit config file, want error")
 	}
 }
+
+// The digest a daemon reports and the digest a client recomputes over the
+// same paths must be the same function, or the comparison means nothing.
+func TestContentDigestMatchesWhatLoadRecorded(t *testing.T) {
+	dir := t.TempDir()
+	a := writeFile(t, dir, "a.toml", "[policy]\nvram_floor_mib = 512\n")
+	b := writeFile(t, dir, "b.toml", "[policy]\nmin_effect_mib = 32\n")
+
+	for _, paths := range [][]string{{a}, {a, b}, {b, a}} {
+		cfg, err := LoadFrom(paths)
+		if err != nil {
+			t.Fatalf("%v: %v", paths, err)
+		}
+		got, err := ContentDigest(cfg.Sources)
+		if err != nil {
+			t.Fatalf("%v: %v", paths, err)
+		}
+		if got != cfg.Hash {
+			t.Errorf("%v: ContentDigest = %s, LoadFrom recorded %s", paths, got, cfg.Hash)
+		}
+	}
+
+	// Order is part of the digest, because it is part of the merge.
+	one, _ := ContentDigest([]string{a, b})
+	other, _ := ContentDigest([]string{b, a})
+	if one == other {
+		t.Error("two load orders hash the same, so a reordering would go unnoticed")
+	}
+}
+
+// The path is not part of the digest. The same bytes at another path are the
+// same configuration, which is what stops a client with its own --config from
+// being called stale against a daemon whose file never changed.
+func TestContentDigestIgnoresWhereTheFileLives(t *testing.T) {
+	body := "[policy]\nvram_floor_mib = 512\n"
+	here := writeFile(t, t.TempDir(), "here.toml", body)
+	there := writeFile(t, t.TempDir(), "somewhere-else.toml", body)
+
+	one, err := ContentDigest([]string{here})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := ContentDigest([]string{there})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one != other {
+		t.Errorf("the same bytes at two paths hash differently: %s and %s", one, other)
+	}
+
+	// Two files still cannot be confused with one holding both, because the
+	// separator is written after each.
+	dir := t.TempDir()
+	split := []string{writeFile(t, dir, "1.toml", "[policy]\n"), writeFile(t, dir, "2.toml", "vram_floor_mib = 512\n")}
+	joined := []string{writeFile(t, dir, "3.toml", "[policy]\nvram_floor_mib = 512\n")}
+	splitDigest, _ := ContentDigest(split)
+	joinedDigest, _ := ContentDigest(joined)
+	if splitDigest == joinedDigest {
+		t.Error("two files hash the same as one file holding both")
+	}
+}
+
+// A file that cannot be read is an error, not a digest of what could be read.
+func TestContentDigestRefusesAnUnreadableFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone.toml")
+	if _, err := ContentDigest([]string{missing}); err == nil {
+		t.Fatal("ContentDigest over a missing file returned no error")
+	} else if !strings.Contains(err.Error(), missing) {
+		t.Errorf("error = %q, want it to name the file", err)
+	}
+}

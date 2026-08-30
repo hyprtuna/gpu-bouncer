@@ -33,7 +33,7 @@ func TestARefusedConfigExitsOneAndSaysWhy(t *testing.T) {
 				}
 				// No daemon: these two commands read the config themselves,
 				// which is where the refusal has to happen.
-				t.Setenv(ipc.EnvSocket, filepath.Join(t.TempDir(), "absent.sock"))
+				t.Setenv(ipc.EnvSocket, filepath.Join(shortDir(t), "absent.sock"))
 
 				code, stdout, stderr := run("--config", path, command)
 				if code != 1 {
@@ -66,7 +66,7 @@ func TestARefusedConfigInJSONIsStillOneObject(t *testing.T) {
 	if err := os.WriteFile(path, []byte("[policy]\npoll_interval = 0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(ipc.EnvSocket, filepath.Join(t.TempDir(), "absent.sock"))
+	t.Setenv(ipc.EnvSocket, filepath.Join(shortDir(t), "absent.sock"))
 
 	code, stdout, stderr := run("--json", "--config", path, "status")
 	if code != 1 {

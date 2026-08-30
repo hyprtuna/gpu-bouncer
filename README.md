@@ -185,7 +185,11 @@ A claim made with `request` stands until you `release` it or the daemon
 restarts; a second `request` for the same service updates the amount and keeps
 the claim's original place in line. While it stands the daemon keeps defending
 it, so a claim you forget about will keep freeing lower priority services.
-`gpu-bouncer status` lists outstanding claims and cooldowns.
+`gpu-bouncer status` lists outstanding claims and cooldowns, and says when
+the daemon is running on an older edit of the files it loaded. That check is
+about the daemon's own files, not the ones the client resolved, so running a
+system daemon alongside a client with a per user overlay is not reported as
+stale.
 
 
 ## Configuration
