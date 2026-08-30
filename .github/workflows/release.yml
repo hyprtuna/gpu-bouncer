@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  # The same gate that guards main guards a release. A tag that cannot pass CI
+  # is not published.
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: gate
+    runs-on: ubuntu-latest
+    # Publishing waits for a human. The environment carries a required
+    # reviewer, so this job does not start until that review is given.
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+
+      # linux/amd64 only. go-nvml requires cgo, so a cross compiled arm64
+      # binary could not be run on this runner, and an unrun binary is not
+      # something to publish.
+      - name: Build
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          version="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/hyprtuna/gpu-bouncer/internal/cli.Version=${version}" \
+            -o dist/gpu-bouncer ./cmd/gpu-bouncer
+
+      # Only binaries that have actually run get published.
+      - name: Verify the binary runs
+        run: |
+          ./dist/gpu-bouncer version
+          ./dist/gpu-bouncer --help >/dev/null
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME}"
+          cd dist
+          tar czf "gpu-bouncer_${version}_linux_amd64.tar.gz" gpu-bouncer
+          sha256sum "gpu-bouncer_${version}_linux_amd64.tar.gz" > "gpu-bouncer_${version}_linux_amd64.tar.gz.sha256"
+          rm gpu-bouncer
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          generate_release_notes: true

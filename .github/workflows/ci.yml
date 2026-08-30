@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The branch ruleset requires a check named exactly "gate". Everything that
+  # must hold before code reaches main runs here, in one job, so that a green
+  # gate is a complete statement rather than a partial one.
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+
+      - name: go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+          "$(go env GOPATH)/bin/staticcheck" ./...
+
+      - name: build
+        run: go build ./...
+
+      # go-nvml binds through cgo. The binary must still build and degrade to
+      # the sysfs source when cgo is unavailable, so that path is compiled too.
+      - name: build without cgo
+        env:
+          CGO_ENABLED: 0
+        run: go build ./...
+
+      - name: test
+        run: go test -race ./...
+
+      - name: no em or en dashes
+        run: |
+          if git grep -nP '\x{2014}|\x{2013}' -- .; then
+            echo "Em and en dashes are not used in this repository. Use a plain hyphen."
+            exit 1
+          fi
