@@ -189,6 +189,8 @@ it, so a claim you forget about will keep freeing lower priority services.
 the daemon is running on an older edit of the files it loaded. That check is
 about the daemon's own files, not the ones the client resolved, so running a
 system daemon alongside a client with a per user overlay is not reported as
+stale. A daemon that took its digest in a way this client cannot reproduce,
+which is any daemon older than 0.1.4, is reported as unknown rather than as
 stale.
 
 

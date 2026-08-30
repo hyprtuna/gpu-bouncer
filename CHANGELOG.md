@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-30
+
+A maintenance tail: two wrong messages on paths an operator actually walks,
+and a few small edges. An existing config file keeps loading, with one
+exception that was never a working setting, a `timeout` over `1h`.
+
+### Fixed
+
+- **A request that had nothing to evict blamed a GPU reading that had
+  succeeded.** `request svc --need-mib N`, with nothing lower in priority
+  holding VRAM, produces a plan with no actions, and the last line read `how
+  much of the 1168 MiB asked for was freed is not known: the GPU could not be
+  read`. The same reply carried `plan.current_free_mib`, a reading the daemon
+  had just taken, and README and INSTALL both promise `freed X MiB of the Y
+  MiB asked for, target not met` here. Nothing ran, so nothing moved that
+  reading: the line now says `freed 0 MiB`, and the unreadable-GPU wording is
+  kept for the case it describes, an action that ran and left no usable
+  reading either side of it.
+- **A client and a daemon of different releases reported a config nobody had
+  edited as stale, permanently.** Up to 0.1.2 the digest a daemon reported
+  covered the file paths as well as their contents; since 0.1.3 it covers the
+  contents alone, and nothing on the wire said which. The two could never
+  match, so `status` said `config_stale: true` and `restart it to apply your
+  edit`, and said it again after the restart. Anyone who upgrades with `go
+  install` and has not yet restarted their daemon was in that state. A daemon
+  now names the recipe it used, and a client compares only a recipe it
+  implements; where it cannot, `config_stale` is null and `status` says the
+  comparison could not be made.
+- **`daemon_config.paths` was absent rather than empty.** It was the one list
+  on the wire still carrying `omitempty`, so a daemon that had loaded no
+  config file sent `daemon_config` without it, against the promise that every
+  list is present and empty as `[]`. A daemon too old to send the list has its
+  joined `path` split into one, so the two never contradict each other.
+- **A refused `unit` did not name the file it was in.** Unit names were
+  checked after every file had been merged, where nothing knows which file
+  supplied a value, so an operator running a system file plus a user overlay
+  was told which service and key were wrong but not which file to edit. Every
+  numeric bound has named the file all along; units are checked the same way
+  now, per file.
+- **`status` reported a wedged daemon as no daemon at all.** A daemon that
+  accepted the connection and then never answered was waited out for 30
+  seconds and reported as `No daemon is running`, which sends an operator to
+  start a second one alongside the first. It is reported as running now, with
+  the fields it never answered on left null.
+- **`release-notes.sh` truncated or overran a section around code fences.** A
+  fence was recognised only at column 1, so an indented one never opened and a
+  `## [` line inside it ended the section early; and a fence nobody closed
+  swallowed the next section into the body, which would publish an older
+  release's notes under this tag. Fences are recognised wherever they are
+  indented to, and an unclosed one is refused rather than guessed at.
+
+### Changed
+
+- `timeout` gains an upper bound of `1h`. Every deadline built from it is that
+  value plus another, and without a bound a config the binary accepted could
+  make that sum overflow an int64 and put the client back on the fixed 90
+  second wait that a long timeout is set to avoid.
+- `free_after_mib` on a `request` or an `evict` reply carries the reading the
+  plan itself was built on when the plan had nothing to run, which is how the
+  daemon already decides `target_met`. It stays null when a reading was taken
+  and failed, and when the card could not be read at all.
+
+### Added
+
+- `digest_recipe` on `daemon_config`: how the daemon computed the digest it
+  reports, `content-v1` for this release. It exists so that a client can tell
+  a digest it can reproduce from one it cannot, rather than reading a
+  disagreement between two recipes as an edit.
+
 ## [0.1.3] - 2026-08-30
 
 The last planned fix round. An existing config file keeps loading, with two
@@ -443,7 +512,8 @@ do not cooperate with each other.
   with a `.sha256` alongside it, and gated behind a GitHub environment that
   requires a human reviewer.
 
-[Unreleased]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.0...v0.1.1

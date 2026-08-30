@@ -37,7 +37,7 @@ A binary installed this way reports the module version Go recorded in it:
 
 ```
 $ gpu-bouncer version
-gpu-bouncer v0.1.3
+gpu-bouncer v0.1.4
 ```
 
 `gpu-bouncer --version` prints the same line. A plain `go build` in a git
@@ -54,7 +54,7 @@ carries two files: a `.tar.gz` holding the single `gpu-bouncer` binary, and a
 `.sha256` file for it.
 
 ```sh
-version=v0.1.3
+version=v0.1.4
 base=gpu-bouncer_${version}_linux_amd64.tar.gz
 
 curl -LO "https://github.com/hyprtuna/gpu-bouncer/releases/download/${version}/${base}"
@@ -70,7 +70,7 @@ downloaded:
 sha256sum -c "${base}.sha256"
 ```
 
-That prints `gpu-bouncer_v0.1.3_linux_amd64.tar.gz: OK` and exits 0. Anything
+That prints `gpu-bouncer_v0.1.4_linux_amd64.tar.gz: OK` and exits 0. Anything
 else means the download does not match what was published: stop, and do not
 unpack it.
 
@@ -100,7 +100,7 @@ To stamp a version number, set the same variable the release workflow sets:
 
 ```sh
 go build -trimpath \
-  -ldflags "-X github.com/hyprtuna/gpu-bouncer/internal/cli.Version=v0.1.3" \
+  -ldflags "-X github.com/hyprtuna/gpu-bouncer/internal/cli.Version=v0.1.4" \
   -o gpu-bouncer ./cmd/gpu-bouncer
 ```
 
@@ -332,7 +332,7 @@ gpu-bouncer version
 ```
 
 ```
-gpu-bouncer v0.1.3
+gpu-bouncer v0.1.4
 ```
 
 ```sh
