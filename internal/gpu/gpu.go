@@ -99,21 +99,22 @@ type Source interface {
 // The returned error is only non nil when no source at all could be opened.
 // It wraps every attempt so the user can see why each one failed.
 func Open() (Source, error) {
-	var attempts []error
-
+	nvmlErr := error(nil)
 	if src, err := openNVML(); err == nil {
 		return src, nil
 	} else {
-		attempts = append(attempts, fmt.Errorf("nvml: %w", err))
+		nvmlErr = fmt.Errorf("nvml: %w", err)
 	}
 
-	if src, err := openSysfs(sysfsDRMRoot); err == nil {
-		return src, nil
-	} else {
-		attempts = append(attempts, fmt.Errorf("sysfs: %w", err))
+	src, err := openSysfs(sysfsDRMRoot)
+	if err != nil {
+		return nil, fmt.Errorf("no usable GPU source: %w", errors.Join(nvmlErr, fmt.Errorf("sysfs: %w", err)))
 	}
-
-	return nil, fmt.Errorf("no usable GPU source: %w", errors.Join(attempts...))
+	// The NVML failure is not forgotten once sysfs opens: on a machine with
+	// an NVIDIA card it is the reason that card cannot be read, and the one
+	// the user needs to see.
+	src.nvmlErr = nvmlErr
+	return src, nil
 }
 
 // OpenSysfs opens the sysfs source against a DRM class directory. It exists so

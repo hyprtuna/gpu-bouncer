@@ -406,16 +406,27 @@ Other GPUs, not arbitrated (policy.gpu_index = 0):
 
 `source: nvml` is the accurate path. `source: sysfs` means NVML could not be
 opened and gpu-bouncer fell back to reading `/sys/class/drm`. Three things
-cause it:
+cause it, and the reason line on an NVIDIA card says which:
 
 - The binary was built with `CGO_ENABLED=0`. go-nvml binds through cgo, so
-  such a binary can never use NVML. Rebuild with cgo enabled.
-- `libnvidia-ml.so` is not loadable. go-nvml resolves it at run time, so a
-  binary built with cgo still starts on a machine with no NVIDIA driver, and
-  simply falls back. Install the NVIDIA driver, or check that the daemon's
-  process can see the library and the device nodes.
+  such a binary can never use NVML. The reason starts with
+  `this build has no NVML support (built without cgo)`. Rebuild with cgo
+  enabled.
+- `libnvidia-ml.so.1` is not loadable. go-nvml resolves it at run time, so a
+  binary built with cgo still starts on a machine with no NVIDIA driver, or
+  with a broken library on the loader path, and falls back. The reason then
+  starts with NVML's own error, for example
+  `nvml: init: ERROR_LIBRARY_NOT_FOUND;`, followed by
+  `NVML, which this build has, could not be opened`. Install the NVIDIA
+  driver, or check that the daemon's process can load the library and see
+  the device nodes.
 - There is no NVIDIA GPU. On an AMD card sysfs is the only source there is,
   and it is working as intended.
+
+A card whose sysfs entries cannot be read, for example a `device` directory
+the daemon's user may not traverse, or a counter file that does not parse, is
+still listed at its index as unreadable with the error, so no other card is
+renumbered and no other card is hidden by it.
 
 The sysfs source lists every DRM card that sits on a PCI device, in kernel
 order, and numbers them in that order. Virtual cards such as simpledrm are
