@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyprtuna/gpu-bouncer/internal/adapter"
 	"github.com/hyprtuna/gpu-bouncer/internal/config"
 	"github.com/hyprtuna/gpu-bouncer/internal/gpu"
 	"github.com/hyprtuna/gpu-bouncer/internal/ipc"
@@ -1180,4 +1182,80 @@ func TestRerequestKeepsItsPlaceInLine(t *testing.T) {
 	if resp := call(t, ipc.Request{Op: ipc.OpRequest, Service: "first", NeedMiB: 100}); resp.Message != "" {
 		t.Errorf("a fresh request carried message %q", resp.Message)
 	}
+}
+
+// At debug level the daemon logs every poll and every adapter request, and
+// a llama-swap API key sent as a bearer on every call never reaches the log.
+func TestDebugLogNeverCarriesTheAPIKey(t *testing.T) {
+	const key = "SUPERSECRET_TOKEN_9x7"
+	t.Setenv("GPU_BOUNCER_LLAMA_SWAP_API_KEY", key)
+	mux := http.NewServeMux()
+	auth := func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Header.Get("Authorization") != "Bearer "+key {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return false
+		}
+		return true
+	}
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "OK") })
+	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
+		if auth(w, r) {
+			_, _ = io.WriteString(w, `{"running":[{"model":"m","state":"ready","ttl":0}]}`)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	log := slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	adapter.Logger = log
+	t.Cleanup(func() { adapter.Logger = nil })
+
+	cfg := config.Config{
+		Policy:   config.Policy{VRAMFloorMiB: 512, PollInterval: config.Duration(20 * time.Millisecond)},
+		Services: []config.Service{{Name: "swap", Adapter: config.AdapterLlamaSwap, Endpoint: srv.URL, Priority: 10}},
+	}
+	if err := config.Validate(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(cfg, &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 100}}, log, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startDaemon(t, d)
+	call(t, ipc.Request{Op: ipc.OpRequest, Service: "swap", NeedMiB: 100})
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	text := buf.String()
+	mu.Unlock()
+	if strings.Contains(text, key) {
+		t.Fatalf("the API key appears in the log:\n%s", text)
+	}
+	if strings.Contains(strings.ToLower(text), "bearer") {
+		t.Errorf("the log mentions the bearer header:\n%s", text)
+	}
+	if !strings.Contains(text, "msg=tick") || !strings.Contains(text, "swap.up=true") {
+		t.Errorf("no per tick debug line with the service's state:\n%s", text)
+	}
+	if !strings.Contains(text, `msg="http request"`) || !strings.Contains(text, "url="+srv.URL+"/running") || !strings.Contains(text, "status=200") {
+		t.Errorf("no per request debug line:\n%s", text)
+	}
+	if !strings.Contains(text, "claim_mib=100") {
+		t.Errorf("the tick line lacks the claim:\n%s", text)
+	}
+}
+
+// lockedWriter serialises the log handler's writes so the test can read
+// the buffer under the same lock.
+type lockedWriter struct {
+	w  io.Writer
+	mu *sync.Mutex
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }

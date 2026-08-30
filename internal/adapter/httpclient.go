@@ -7,11 +7,32 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"time"
 )
+
+// Logger, when set, receives one debug line per HTTP request the adapters
+// make: method, redacted URL, status and duration. Headers are never
+// logged, so a bearer token cannot reach it. The daemon sets it; the read
+// only commands leave it nil.
+var Logger *slog.Logger
+
+// logRequest reports one request at debug level.
+func logRequest(method, redactedURL string, status int, start time.Time, err error) {
+	if Logger == nil {
+		return
+	}
+	attrs := []any{"method", method, "url", redactedURL, "duration", time.Since(start).Round(time.Millisecond).String()}
+	if err != nil {
+		attrs = append(attrs, "error", err.Error())
+	} else {
+		attrs = append(attrs, "status", status)
+	}
+	Logger.Debug("http request", attrs...)
+}
 
 // maxBody caps how much of a response we will read. A service that answers a
 // small status query with megabytes is misbehaving, and reading it all would
@@ -127,14 +148,17 @@ func doJSON(ctx context.Context, client *http.Client, method, rawURL string, bod
 		req.Header.Set(k, v)
 	}
 
+	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
+		logRequest(method, url, 0, start, redactErr(err))
 		return fmt.Errorf("%s %s: %w", method, url, redactErr(err))
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))
 		_ = resp.Body.Close()
 	}()
+	logRequest(method, url, resp.StatusCode, start, nil)
 
 	if err := refuseRedirect(method, url, resp); err != nil {
 		return err
@@ -178,11 +202,14 @@ func doText(ctx context.Context, client *http.Client, method, rawURL string, bod
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
+		logRequest(method, url, 0, start, redactErr(err))
 		return "", fmt.Errorf("%s %s: %w", method, url, redactErr(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
+	logRequest(method, url, resp.StatusCode, start, nil)
 
 	if err := refuseRedirect(method, url, resp); err != nil {
 		return "", err

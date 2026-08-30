@@ -274,7 +274,12 @@ gpu-bouncer daemon --log-level debug
 ```
 
 `--log-level` takes `debug`, `info`, `warn` or `error`, and defaults to
-`info`. Logs go to stderr.
+`info`. Logs go to stderr. At `debug` the daemon writes one line per poll
+with the VRAM reading and, per service, whether it is up, what it holds,
+whether it is idle, its probe error, its cooldown and its claim, and one
+line per HTTP request an adapter makes, with the method, the URL, the status
+and the duration. Request headers are never logged, so a llama-swap API key
+never appears.
 
 ## Verify it works
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hyprtuna/gpu-bouncer/internal/adapter"
 	"github.com/hyprtuna/gpu-bouncer/internal/config"
 	"github.com/hyprtuna/gpu-bouncer/internal/daemon"
 	"github.com/hyprtuna/gpu-bouncer/internal/gpu"
@@ -116,6 +117,9 @@ func runDaemon(ctx context.Context, args []string, g *globals, env Env) error {
 		return fmt.Errorf("invalid --log-level %q", *logLevel)
 	}
 	log := slog.New(slog.NewTextHandler(env.Stderr, &slog.HandlerOptions{Level: level}))
+	// At debug level every adapter request is logged too. Only the daemon
+	// makes requests worth a log; the read only commands print their result.
+	adapter.Logger = log
 
 	cfg, err := loadConfig()
 	if err != nil {

@@ -141,6 +141,7 @@ func (d *Daemon) tick(ctx context.Context) {
 	obs := d.observation(ctx)
 	d.applyCooldowns(&obs)
 	plan := scheduler.Decide(d.cfg, obs)
+	d.logTick(obs, plan)
 	if plan.Empty() {
 		return
 	}
@@ -154,6 +155,47 @@ func (d *Daemon) tick(ctx context.Context) {
 	for _, action := range plan.Actions {
 		go d.executeGuarded(ctx, action)
 	}
+}
+
+// logTick writes one debug line per poll with everything the decision was
+// made from: the VRAM reading and, per service, what was observed.
+func (d *Daemon) logTick(obs scheduler.Observation, plan scheduler.Plan) {
+	if !d.log.Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+	claims := make(map[string]uint64, len(obs.Claims))
+	for _, c := range obs.Claims {
+		claims[c.Service] = c.NeedMiB
+	}
+	attrs := []any{
+		"device_known", obs.DeviceKnown,
+		"free_mib", obs.Device.FreeMiB(),
+		"trigger", string(plan.Trigger),
+		"actions", len(plan.Actions),
+	}
+	if obs.DeviceErr != "" {
+		attrs = append(attrs, "device_error", obs.DeviceErr)
+	}
+	for _, s := range obs.Services {
+		fields := []any{"up", s.Up, "held_mib", s.HeldMiB}
+		if s.IdleKnown {
+			fields = append(fields, "idle", s.Idle)
+		}
+		if s.ProbeErr != "" {
+			fields = append(fields, "probe_error", s.ProbeErr)
+		}
+		if !s.CooldownUntil.IsZero() {
+			fields = append(fields, "cooldown_until", s.CooldownUntil.Format(time.RFC3339))
+		}
+		if need, ok := claims[s.Name]; ok {
+			fields = append(fields, "claim_mib", need)
+		}
+		if s.ActionInFlight {
+			fields = append(fields, "action_in_flight", true)
+		}
+		attrs = append(attrs, slog.Group(s.Name, fields...))
+	}
+	d.log.Debug("tick", attrs...)
 }
 
 // observation reads the world and attaches the current claims and the
