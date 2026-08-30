@@ -163,3 +163,48 @@ func TestMutatingCommandsNeedADaemon(t *testing.T) {
 		}
 	}
 }
+
+// The release workflow runs "gpu-bouncer --help" under bash -e to prove the
+// binary it is about to publish actually runs. A non zero exit there would
+// block every release, so the exit code is pinned.
+func TestHelpExitsZero(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}} {
+		var stdout, stderr bytes.Buffer
+		code := Main(args, Env{Stdout: &stdout, Stderr: &stderr})
+		if code != 0 {
+			t.Errorf("%v exit code = %d, want 0 (stderr: %s)", args, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Usage") {
+			t.Errorf("%v printed no usage to stdout", args)
+		}
+	}
+}
+
+// --json and --verbose are global, but people type them after the command.
+func TestOutputFlagsAcceptedAfterTheCommand(t *testing.T) {
+	t.Setenv("GPU_BOUNCER_CONFIG", "/nonexistent/gpu-bouncer-does-not-exist.toml")
+	for _, args := range [][]string{
+		{"status", "--json"},
+		{"plan", "--json"},
+		{"status", "--verbose"},
+		{"plan", "-v"},
+	} {
+		var stdout, stderr bytes.Buffer
+		Main(args, Env{Stdout: &stdout, Stderr: &stderr})
+		// The config is missing so the command fails, but it must fail on the
+		// config rather than on the flag.
+		if strings.Contains(stderr.String(), "flag provided but not defined") {
+			t.Errorf("%v rejected the flag: %s", args, stderr.String())
+		}
+	}
+}
+
+func TestStatusRejectsStrayArguments(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Main([]string{"status", "ollama"}, Env{Stdout: &stdout, Stderr: &stderr}); code == 0 {
+		t.Error("status accepted a stray argument")
+	}
+	if !strings.Contains(stderr.String(), "takes no arguments") {
+		t.Errorf("stderr = %q, want it to say status takes no arguments", stderr.String())
+	}
+}

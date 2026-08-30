@@ -85,6 +85,14 @@ func Main(args []string, env Env) int {
 	fs.BoolVar(&g.verbose, "v", false, "include per service reasoning")
 
 	if err := fs.Parse(args); err != nil {
+		// Asking for help is not a usage error. The release workflow runs
+		// "gpu-bouncer --help" under bash -e to prove the binary it is about
+		// to publish actually runs, so a non zero exit here would block every
+		// release.
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(env.Stdout, usage)
+			return 0
+		}
 		return 2
 	}
 	// Global flags are accepted before the command name only. Everything from

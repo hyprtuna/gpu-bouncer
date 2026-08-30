@@ -27,6 +27,27 @@ func newFlagSet(name string, env Env) *flag.FlagSet {
 	return fs
 }
 
+// addOutputFlags lets --json and --verbose be given after the command name as
+// well as before it. They are global flags, but "gpu-bouncer status --json" is
+// what people type, and rejecting it teaches nothing.
+func addOutputFlags(fs *flag.FlagSet, g *globals) {
+	fs.BoolVar(&g.asJSON, "json", g.asJSON, "emit JSON")
+	fs.BoolVar(&g.verbose, "verbose", g.verbose, "include per service reasoning")
+	fs.BoolVar(&g.verbose, "v", g.verbose, "include per service reasoning")
+}
+
+// noPositionals parses a command that takes no arguments of its own.
+func noPositionals(fs *flag.FlagSet, args []string, command string) error {
+	positional, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) > 0 {
+		return fmt.Errorf("%s takes no arguments, got %q", command, positional[0])
+	}
+	return nil
+}
+
 // parseArgs parses flags that appear anywhere, before or after the positional
 // arguments, and returns the positionals.
 //
@@ -97,7 +118,8 @@ func runDaemon(ctx context.Context, args []string, g globals, env Env) error {
 // so it is safe on a machine where gpu-bouncer is only installed, not running.
 func runStatus(ctx context.Context, args []string, g globals, env Env) error {
 	fs := newFlagSet("status", env)
-	if err := fs.Parse(args); err != nil {
+	addOutputFlags(fs, &g)
+	if err := noPositionals(fs, args, "status"); err != nil {
 		return err
 	}
 	cfg, err := loadConfig()
@@ -178,7 +200,8 @@ func runStatus(ctx context.Context, args []string, g globals, env Env) error {
 // because only the daemon knows the outstanding claims.
 func runPlan(ctx context.Context, args []string, g globals, env Env) error {
 	fs := newFlagSet("plan", env)
-	if err := fs.Parse(args); err != nil {
+	addOutputFlags(fs, &g)
+	if err := noPositionals(fs, args, "plan"); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
@@ -237,6 +260,7 @@ func runRequest(ctx context.Context, args []string, g globals, env Env) error {
 // runReleaseClaim drops a claim. It does not itself free any VRAM.
 func runReleaseClaim(ctx context.Context, args []string, g globals, env Env) error {
 	fs := newFlagSet("release", env)
+	dryRun := fs.Bool("dry-run", false, "do not change anything")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -245,7 +269,9 @@ func runReleaseClaim(ctx context.Context, args []string, g globals, env Env) err
 	if err != nil {
 		return err
 	}
-	return callDaemon(ctx, g, env, ipc.Request{Op: ipc.OpRelease, Service: service})
+	return callDaemon(ctx, g, env, ipc.Request{
+		Op: ipc.OpRelease, Service: service, DryRun: g.dryRun || *dryRun,
+	})
 }
 
 // runEvict frees named services now.

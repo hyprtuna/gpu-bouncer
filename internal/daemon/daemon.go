@@ -8,7 +8,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -348,6 +347,15 @@ func (d *Daemon) handleReleaseClaim(req ipc.Request) ipc.Response {
 	if req.Service == "" {
 		return ipc.Response{Error: "release needs a service name"}
 	}
+	if req.DryRun || d.dryRun {
+		d.mu.Lock()
+		_, had := d.claims[req.Service]
+		d.mu.Unlock()
+		if !had {
+			return ipc.Response{OK: true, Message: fmt.Sprintf("dry run: %s holds no claim", req.Service)}
+		}
+		return ipc.Response{OK: true, Message: fmt.Sprintf("dry run: would release the claim held by %s", req.Service)}
+	}
 	d.mu.Lock()
 	_, had := d.claims[req.Service]
 	delete(d.claims, req.Service)
@@ -381,7 +389,3 @@ func (d *Daemon) handleEvict(ctx context.Context, req ipc.Request) ipc.Response 
 	resp.Executed = d.execute(ctx, plan)
 	return resp
 }
-
-// ErrNoServices is returned when a daemon is asked to start with nothing to
-// manage and strict startup was requested.
-var ErrNoServices = errors.New("no services are configured")
