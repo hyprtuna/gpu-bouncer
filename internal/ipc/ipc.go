@@ -127,6 +127,12 @@ type Response struct {
 	Executed []ActionResult  `json:"executed,omitempty"`
 	Claims   []ClaimReport   `json:"claims,omitempty"`
 	Message  string          `json:"message,omitempty"`
+
+	// DaemonRunning and Config are filled by the status command only, which
+	// reuses this type as its report. Config is the path the configuration
+	// came from, or JSON null when no file was found.
+	DaemonRunning *bool           `json:"daemon_running,omitempty"`
+	Config        json.RawMessage `json:"config,omitempty"`
 }
 
 // ClaimReport is one outstanding claim.

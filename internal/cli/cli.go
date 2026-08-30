@@ -18,6 +18,7 @@ import (
 	"syscall"
 
 	"github.com/hyprtuna/gpu-bouncer/internal/config"
+	"github.com/hyprtuna/gpu-bouncer/internal/ipc"
 )
 
 // Version is stamped at build time with -ldflags "-X ...cli.Version=v0.1.0".
@@ -30,7 +31,8 @@ type Env struct {
 	Stderr io.Writer
 }
 
-// globals are the flags accepted before the subcommand name.
+// globals are the flags accepted before the subcommand name. The output flags
+// and --dry-run are also accepted after it, see addOutputFlags.
 type globals struct {
 	configPath string
 	dryRun     bool
@@ -58,12 +60,19 @@ Flags:
   --json              Emit JSON instead of text.
   -v, --verbose       Include per service reasoning in text output.
 
+--dry-run, --json and --verbose are also accepted after the command name.
 Run "gpu-bouncer <command> --help" for command specific flags.
 
 Configuration is read from, in order:
   /etc/gpu-bouncer/config.toml
   $XDG_CONFIG_HOME/gpu-bouncer/config.toml (defaults to ~/.config)
 `
+
+// exitCode is returned by a command that has already reported its outcome
+// and only needs the process to exit non zero. Main prints nothing for it.
+type exitCode int
+
+func (e exitCode) Error() string { return fmt.Sprintf("exit %d", int(e)) }
 
 // Main runs one command and returns the process exit code.
 func Main(args []string, env Env) int {
@@ -74,10 +83,14 @@ func Main(args []string, env Env) int {
 		env.Stderr = os.Stderr
 	}
 
-	var g globals
+	g := &globals{}
 	fs := flag.NewFlagSet("gpu-bouncer", flag.ContinueOnError)
-	fs.SetOutput(env.Stderr)
-	fs.Usage = func() { fmt.Fprint(env.Stderr, usage) }
+	// The flag package prints every parse error itself, followed by a usage
+	// dump, before returning the error. Both are silenced here so that an
+	// error is reported exactly once, by fail, and --help is answered once,
+	// by the usage block below.
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
 	fs.StringVar(&g.configPath, "config", "", "path to a config file")
 	fs.BoolVar(&g.dryRun, "dry-run", false, "do not change anything")
 	fs.BoolVar(&g.asJSON, "json", false, "emit JSON")
@@ -93,7 +106,7 @@ func Main(args []string, env Env) int {
 			fmt.Fprint(env.Stdout, usage)
 			return 0
 		}
-		return 2
+		return fail(env, g, err)
 	}
 	// Global flags are accepted before the command name only. Everything from
 	// the command name onward belongs to the subcommand, which does its own
@@ -108,8 +121,7 @@ func Main(args []string, env Env) int {
 		// The config package reads this env var, which keeps path resolution
 		// in one place rather than threading an override through every call.
 		if err := os.Setenv(config.EnvConfig, g.configPath); err != nil {
-			fmt.Fprintf(env.Stderr, "gpu-bouncer: %v\n", err)
-			return 1
+			return fail(env, g, err)
 		}
 	}
 
@@ -118,6 +130,7 @@ func Main(args []string, env Env) int {
 
 	command, commandArgs := rest[0], rest[1:]
 	err := dispatch(ctx, command, commandArgs, g, env)
+	var code exitCode
 	switch {
 	case err == nil:
 		return 0
@@ -125,13 +138,28 @@ func Main(args []string, env Env) int {
 		return 0
 	case errors.Is(err, context.Canceled):
 		return 0
+	case errors.As(err, &code):
+		return int(code)
 	default:
-		fmt.Fprintf(env.Stderr, "gpu-bouncer: %v\n", err)
-		return 1
+		return fail(env, g, err)
 	}
 }
 
-func dispatch(ctx context.Context, command string, args []string, g globals, env Env) error {
+// fail reports an error once and returns the exit code. With --json the
+// report is a JSON object on stdout, so a script parsing the output never
+// has to fall back to reading stderr.
+func fail(env Env, g *globals, err error) int {
+	if g.asJSON {
+		if werr := writeJSON(env, ipc.Response{OK: false, Error: err.Error()}); werr != nil {
+			fmt.Fprintf(env.Stderr, "gpu-bouncer: %v\n", werr)
+		}
+		return 1
+	}
+	fmt.Fprintf(env.Stderr, "gpu-bouncer: %v\n", err)
+	return 1
+}
+
+func dispatch(ctx context.Context, command string, args []string, g *globals, env Env) error {
 	switch command {
 	case "daemon":
 		return runDaemon(ctx, args, g, env)
@@ -146,8 +174,7 @@ func dispatch(ctx context.Context, command string, args []string, g globals, env
 	case "evict":
 		return runEvict(ctx, args, g, env)
 	case "version":
-		fmt.Fprintf(env.Stdout, "gpu-bouncer %s\n", Version)
-		return nil
+		return runVersion(args, g, env)
 	case "help", "--help", "-h":
 		fmt.Fprint(env.Stdout, usage)
 		return nil

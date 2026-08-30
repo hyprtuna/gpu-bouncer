@@ -96,11 +96,18 @@ func TestParseArgsReportsBadFlags(t *testing.T) {
 }
 
 func TestParseArgsHelpIsNotAnError(t *testing.T) {
-	var stderr bytes.Buffer
-	fs := newFlagSet("request", Env{Stderr: &stderr})
+	var stdout, stderr bytes.Buffer
+	fs := newFlagSet("request", Env{Stdout: &stdout, Stderr: &stderr})
+	fs.Uint64("need-mib", 0, "free VRAM wanted")
 	_, err := parseArgs(fs, []string{"--help"})
 	if err != flag.ErrHelp {
 		t.Fatalf("parseArgs(--help) = %v, want flag.ErrHelp so the command exits 0", err)
+	}
+	if !strings.HasPrefix(stdout.String(), "Usage of gpu-bouncer request:") || !strings.Contains(stdout.String(), "need-mib") {
+		t.Errorf("stdout = %q, want the command's flags", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing for --help", stderr.String())
 	}
 }
 
