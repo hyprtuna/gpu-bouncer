@@ -2,7 +2,9 @@ package gpu
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,17 +31,25 @@ const sysfsDRMRoot = "/sys/class/drm"
 type sysfsSource struct {
 	root  string
 	cards []sysfsCard
+	// nvmlErr is why NVML was not used, when it was tried and failed. It
+	// leads the unreadable reason of an NVIDIA card, because on such a
+	// machine that failure, not sysfs, is what the user has to fix.
+	nvmlErr error
 }
 
 type sysfsCard struct {
 	num        int
 	devicePath string
+	// vendorErr is a failure to stat device/vendor for any reason other than
+	// its absence. Such a card is real for all anyone can tell, so it keeps
+	// its place in the numbering and is reported unreadable.
+	vendorErr error
 }
 
 // pciAddressRE matches a PCI address such as 0000:01:00.0.
 var pciAddressRE = regexp.MustCompile(`^[0-9a-fA-F]{4,}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]$`)
 
-func openSysfs(root string) (Source, error) {
+func openSysfs(root string) (*sysfsSource, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", root, err)
@@ -59,11 +69,18 @@ func openSysfs(root string) (Source, error) {
 		}
 		devicePath := filepath.Join(root, name, "device")
 		// A card without a PCI vendor is virtual (simpledrm, vkms, a
-		// framebuffer) and holds no VRAM anyone arbitrates.
+		// framebuffer) and holds no VRAM anyone arbitrates. Only absence
+		// means virtual: a vendor file that exists but cannot be reached,
+		// for example under a device directory this process may not
+		// traverse, belongs to a real card that must keep its index.
+		card := sysfsCard{num: num, devicePath: devicePath}
 		if _, err := os.Stat(filepath.Join(devicePath, "vendor")); err != nil {
-			continue
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			card.vendorErr = err
 		}
-		found = append(found, sysfsCard{num: num, devicePath: devicePath})
+		found = append(found, card)
 	}
 	if len(found) == 0 {
 		return nil, ErrNoDevices
@@ -78,43 +95,68 @@ func (s *sysfsSource) Devices(ctx context.Context) ([]Device, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// One card that cannot be read never hides the others: each failure is
+	// recorded on its own device, and the numbering is fixed at open time.
 	devices := make([]Device, 0, len(s.cards))
 	for i, c := range s.cards {
-		dev := Device{
-			Index:  i,
-			Vendor: strings.TrimSpace(readStringFile(filepath.Join(c.devicePath, "vendor"))),
-			BusID:  sysfsBusID(c.devicePath),
-		}
-		dev.Name = sysfsCardName(c.devicePath, dev)
-
-		totalPath := filepath.Join(c.devicePath, "mem_info_vram_total")
-		if _, err := os.Stat(totalPath); err != nil {
-			dev.Unreadable = sysfsUnreadableReason(dev)
-			devices = append(devices, dev)
-			continue
-		}
-		total, err := readUintFile(totalPath)
-		if err != nil {
-			return nil, err
-		}
-		used, err := readUintFile(filepath.Join(c.devicePath, "mem_info_vram_used"))
-		if err != nil {
-			return nil, err
-		}
-		dev.TotalMiB = total / BytesPerMiB
-		dev.UsedMiB = used / BytesPerMiB
-		devices = append(devices, dev)
+		devices = append(devices, s.readCard(i, c))
 	}
 	return devices, nil
 }
 
-// sysfsUnreadableReason explains why a listed card has no VRAM figures. The
-// NVIDIA case is spelled out because it is the one a user can fix.
-func sysfsUnreadableReason(dev Device) string {
-	if dev.Vendor == "0x10de" {
-		return "sysfs exposes no VRAM counters for an NVIDIA card: reading it needs a gpu-bouncer build with cgo and the NVIDIA driver, see INSTALL.md"
+// readCard reads one card's identity and counters. Every failure after the
+// index is assigned becomes an Unreadable reason on that card.
+func (s *sysfsSource) readCard(index int, c sysfsCard) Device {
+	dev := Device{Index: index, BusID: sysfsBusID(c.devicePath), Name: "unknown GPU"}
+	if c.vendorErr != nil {
+		dev.Unreadable = fmt.Sprintf("the card's device directory cannot be read: %v", c.vendorErr)
+		return dev
 	}
-	return fmt.Sprintf("sysfs exposes no mem_info_vram_total for this card (vendor %s), so its VRAM cannot be read", dev.Vendor)
+	vendor, err := os.ReadFile(filepath.Join(c.devicePath, "vendor"))
+	if err != nil {
+		dev.Unreadable = fmt.Sprintf("the card's vendor file cannot be read: %v", err)
+		return dev
+	}
+	dev.Vendor = strings.TrimSpace(string(vendor))
+	dev.Name = sysfsCardName(c.devicePath, dev)
+
+	totalPath := filepath.Join(c.devicePath, "mem_info_vram_total")
+	if _, err := os.Stat(totalPath); err != nil {
+		dev.Unreadable = unreadableReason(dev, s.nvmlErr, nvmlBuiltIn)
+		return dev
+	}
+	total, err := readUintFile(totalPath)
+	if err != nil {
+		dev.Unreadable = err.Error()
+		return dev
+	}
+	used, err := readUintFile(filepath.Join(c.devicePath, "mem_info_vram_used"))
+	if err != nil {
+		dev.Unreadable = err.Error()
+		return dev
+	}
+	dev.TotalMiB = total / BytesPerMiB
+	dev.UsedMiB = used / BytesPerMiB
+	return dev
+}
+
+// unreadableReason explains why a listed card has no VRAM counters in sysfs.
+// The NVIDIA case is spelled out because it is the one a user can fix, and
+// the fix depends on why NVML was not used: a build without NVML support
+// needs a different build, a build with it whose NVML failed to load needs
+// the driver's library reachable, and that failure text comes first.
+func unreadableReason(dev Device, nvmlErr error, builtIn bool) string {
+	if dev.Vendor != "0x10de" {
+		return fmt.Sprintf("sysfs exposes no mem_info_vram_total for this card (vendor %s), so its VRAM cannot be read", dev.Vendor)
+	}
+	switch {
+	case builtIn && nvmlErr != nil:
+		return fmt.Sprintf("%v; sysfs exposes no VRAM counters for an NVIDIA card, and NVML, which this build has, could not be opened: check that libnvidia-ml.so.1 from the NVIDIA driver is installed and loadable by this process, see INSTALL.md", nvmlErr)
+	case !builtIn:
+		return "this build has no NVML support (built without cgo), and sysfs exposes no VRAM counters for an NVIDIA card: reading it needs a gpu-bouncer build with cgo and the NVIDIA driver, see INSTALL.md"
+	default:
+		return "sysfs exposes no VRAM counters for an NVIDIA card: reading it needs NVML, which needs a gpu-bouncer build with cgo and the NVIDIA driver, see INSTALL.md"
+	}
 }
 
 // Processes cannot be answered from these sysfs attributes. Saying so is
@@ -150,7 +192,10 @@ func sysfsCardName(devicePath string, dev Device) string {
 			return name
 		}
 	}
-	device := strings.TrimSpace(readStringFile(filepath.Join(devicePath, "device")))
+	var device string
+	if data, err := os.ReadFile(filepath.Join(devicePath, "device")); err == nil {
+		device = strings.TrimSpace(string(data))
+	}
 	if vendorName := dev.VendorName(); vendorName != "" && device != "" {
 		return fmt.Sprintf("%s device %s", vendorName, device)
 	}
@@ -158,14 +203,6 @@ func sysfsCardName(devicePath string, dev Device) string {
 		return fmt.Sprintf("PCI %s:%s", strings.TrimPrefix(dev.Vendor, "0x"), strings.TrimPrefix(device, "0x"))
 	}
 	return "unknown GPU"
-}
-
-func readStringFile(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return string(data)
 }
 
 func readUintFile(path string) (uint64, error) {

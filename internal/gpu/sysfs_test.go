@@ -272,16 +272,158 @@ func TestSysfsMissingRoot(t *testing.T) {
 	}
 }
 
-func TestSysfsGarbageCounter(t *testing.T) {
+// One card whose counters cannot be read must not hide the others: it is
+// reported unreadable with the reason, and every other card keeps its index
+// and its figures.
+func TestSysfsOneBadCardDoesNotBlindTheSource(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		total      string
+		used       string
+		wantReason string
+	}{
+		{"garbage total", "not a number\n", "0\n", "is not a byte count"},
+		{"total without used", "8589934592\n", "", "mem_info_vram_used"},
+		{"garbage used", "8589934592\n", "x\n", "is not a byte count"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			amdCard(t, root, "card0", "0000:01:00.0", "4294967296\n", "0\n")
+			amdCard(t, root, "card1", "0000:03:00.0", tt.total, tt.used)
+			amdCard(t, root, "card2", "0000:05:00.0", "2147483648\n", "1048576\n")
+
+			devices := openFake(t, root)
+			assertNumbering(t, devices, "0000:01:00.0", "0000:03:00.0", "0000:05:00.0")
+			if devices[0].Unreadable != "" || devices[0].TotalMiB != 4096 {
+				t.Errorf("card0 = %+v, want readable at 4096 MiB", devices[0])
+			}
+			if !strings.Contains(devices[1].Unreadable, tt.wantReason) {
+				t.Errorf("card1 Unreadable = %q, want it to mention %q", devices[1].Unreadable, tt.wantReason)
+			}
+			if devices[2].Unreadable != "" || devices[2].TotalMiB != 2048 || devices[2].UsedMiB != 1 {
+				t.Errorf("card2 = %+v, want readable at 2048 MiB with 1 MiB used", devices[2])
+			}
+		})
+	}
+}
+
+// assertNumbering checks that the devices are exactly these bus ids at
+// indexes 0, 1, 2 and so on: an unreadable card keeps its place.
+func assertNumbering(t *testing.T, devices []Device, busIDs ...string) {
+	t.Helper()
+	if len(devices) != len(busIDs) {
+		t.Fatalf("got %d devices, want %d: %+v", len(devices), len(busIDs), devices)
+	}
+	for i, want := range busIDs {
+		if devices[i].Index != i || devices[i].BusID != want {
+			t.Errorf("devices[%d] = index %d bus %q, want index %d bus %q", i, devices[i].Index, devices[i].BusID, i, want)
+		}
+	}
+}
+
+// A device directory this process cannot traverse belongs to a real card.
+// The card stays in the numbering, unreadable with the error, and the cards
+// after it are not renumbered. Root can traverse anything, so the case is
+// skipped there rather than silently passing.
+func TestSysfsUnreadableDeviceDirKeepsItsIndex(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not apply to root")
+	}
 	root := t.TempDir()
-	amdCard(t, root, "card0", "0000:03:00.0", "not a number\n", "0\n")
+	fakeCard(t, root, "card0", "0x10de", "0000:01:00.0", "", "", map[string]string{"device": "0x2820\n"})
+	amdCard(t, root, "card1", "0000:05:00.0", "2147483648\n", "0\n")
+	locked := filepath.Join(root, "devices", "0000:01:00.0")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	devices := openFake(t, root)
+	assertNumbering(t, devices, "0000:01:00.0", "0000:05:00.0")
+	if !strings.Contains(devices[0].Unreadable, "device directory cannot be read") || !strings.Contains(devices[0].Unreadable, "permission denied") {
+		t.Errorf("card0 Unreadable = %q, want the permission error", devices[0].Unreadable)
+	}
+	if devices[1].Unreadable != "" || devices[1].TotalMiB != 2048 {
+		t.Errorf("card1 = %+v, want readable at index 1", devices[1])
+	}
+}
+
+// A vendor file that exists but cannot be read is reported as such, not as
+// an empty vendor.
+func TestSysfsUnreadableVendorFileIsNamed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not apply to root")
+	}
+	root := t.TempDir()
+	amdCard(t, root, "card0", "0000:03:00.0", "8589934592\n", "0\n")
+	vendor := filepath.Join(root, "devices", "0000:03:00.0", "vendor")
+	if err := os.Chmod(vendor, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(vendor, 0o644) })
+
+	devices := openFake(t, root)
+	assertNumbering(t, devices, "0000:03:00.0")
+	if !strings.Contains(devices[0].Unreadable, "vendor file cannot be read") || strings.Contains(devices[0].Unreadable, "(vendor )") {
+		t.Errorf("Unreadable = %q, want it to say the vendor file could not be read", devices[0].Unreadable)
+	}
+}
+
+// The reason for an unreadable NVIDIA card depends on why NVML is not in
+// use, and when NVML was tried and failed its error comes first.
+func TestUnreadableReason(t *testing.T) {
+	nv := Device{Vendor: "0x10de"}
+	nvmlErr := errors.New("nvml: init: Driver/library version mismatch")
+	for _, tt := range []struct {
+		name    string
+		dev     Device
+		nvmlErr error
+		builtIn bool
+		prefix  string
+		want    []string
+		wantNot []string
+	}{
+		{"NVML built in and failed", nv, nvmlErr, true, "nvml: init: Driver/library version mismatch;",
+			[]string{"NVML, which this build has, could not be opened", "libnvidia-ml.so.1"}, []string{"without cgo"}},
+		{"built without NVML", nv, errors.New("nvml: built without cgo"), false, "this build has no NVML support",
+			[]string{"build with cgo and the NVIDIA driver"}, []string{"libnvidia-ml.so.1"}},
+		{"AMD card without counters", Device{Vendor: "0x1002"}, nvmlErr, true, "sysfs exposes no mem_info_vram_total",
+			[]string{"vendor 0x1002"}, []string{"nvml"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unreadableReason(tt.dev, tt.nvmlErr, tt.builtIn)
+			if !strings.HasPrefix(got, tt.prefix) {
+				t.Errorf("reason = %q, want prefix %q", got, tt.prefix)
+			}
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("reason = %q, want it to contain %q", got, w)
+				}
+			}
+			for _, w := range tt.wantNot {
+				if strings.Contains(got, w) {
+					t.Errorf("reason = %q, must not contain %q", got, w)
+				}
+			}
+		})
+	}
+}
+
+// Open carries the NVML failure into the sysfs source it falls back to.
+func TestSysfsSourceCarriesNVMLError(t *testing.T) {
+	root := t.TempDir()
+	fakeCard(t, root, "card0", "0x10de", "0000:01:00.0", "", "", map[string]string{"device": "0x2820\n"})
 	src, err := openSysfs(root)
 	if err != nil {
-		t.Fatalf("openSysfs: %v", err)
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = src.Close() })
-	if _, err := src.Devices(context.Background()); err == nil {
-		t.Fatal("Devices accepted a non numeric counter, want error")
+	src.nvmlErr = errors.New("nvml: init: Driver/library version mismatch")
+	devices, err := src.Devices(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(devices[0].Unreadable, "nvml: init: Driver/library version mismatch") {
+		t.Errorf("Unreadable = %q, want the NVML error first", devices[0].Unreadable)
 	}
 }
 

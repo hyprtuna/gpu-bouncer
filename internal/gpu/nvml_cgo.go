@@ -11,6 +11,9 @@ import (
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 )
 
+// nvmlBuiltIn says whether this binary can use NVML at all.
+const nvmlBuiltIn = true
+
 // nvmlSource reads through the NVIDIA Management Library. go-nvml loads
 // libnvidia-ml.so at run time, so a binary built with cgo still starts on a
 // machine that has no NVIDIA driver: Init simply fails and Open falls back.
