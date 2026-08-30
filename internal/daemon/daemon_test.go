@@ -1130,3 +1130,54 @@ func TestElide(t *testing.T) {
 		t.Errorf("elide(500 chars) = %d chars, want 80 plus three dots", len(got))
 	}
 }
+
+// A second request for the same service updates the amount and keeps the
+// original timestamp, so re-asking does not lose an equal priority tie to a
+// peer that asked in between.
+func TestRerequestKeepsItsPlaceInLine(t *testing.T) {
+	cfg := config.Config{
+		Policy: config.Policy{VRAMFloorMiB: 512, PollInterval: config.Duration(time.Hour)},
+		Services: []config.Service{
+			{Name: "first", Adapter: config.AdapterOllama, Endpoint: (&fakeOllamaServer{}).start(t), Priority: 50},
+			{Name: "second", Adapter: config.AdapterOllama, Endpoint: (&fakeOllamaServer{}).start(t), Priority: 50},
+		},
+	}
+	testDaemon(t, cfg, &fakeGPU{device: gpu.Device{Index: 0, TotalMiB: 8192, UsedMiB: 100}}, false)
+
+	call(t, ipc.Request{Op: ipc.OpRequest, Service: "first", NeedMiB: 100})
+	since := call(t, ipc.Request{Op: ipc.OpStatus}).Claims[0].At
+	time.Sleep(5 * time.Millisecond)
+	call(t, ipc.Request{Op: ipc.OpRequest, Service: "second", NeedMiB: 100})
+	time.Sleep(5 * time.Millisecond)
+
+	resp := call(t, ipc.Request{Op: ipc.OpRequest, Service: "first", NeedMiB: 200})
+	if want := "updated the claim held since " + since.Format(time.RFC3339); resp.Message != want {
+		t.Errorf("message = %q, want %q", resp.Message, want)
+	}
+	status := call(t, ipc.Request{Op: ipc.OpStatus})
+	var first *ipc.ClaimReport
+	for i := range status.Claims {
+		if status.Claims[i].Service == "first" {
+			first = &status.Claims[i]
+		}
+	}
+	if first == nil {
+		t.Fatalf("claims = %+v, want first", status.Claims)
+	}
+	if first.NeedMiB != 200 {
+		t.Errorf("need_mib = %d, want the updated 200", first.NeedMiB)
+	}
+	if !first.At.Equal(since) {
+		t.Errorf("at = %s, want the original %s", first.At, since)
+	}
+	if plan := call(t, ipc.Request{Op: ipc.OpPlan}); plan.Plan == nil || plan.Plan.Beneficiary != "first" {
+		t.Errorf("beneficiary = %v, want first, which asked first and asked again", plan.Plan)
+	}
+	// A first request carries no such message.
+	if resp := call(t, ipc.Request{Op: ipc.OpRelease, Service: "first"}); !resp.OK {
+		t.Fatal(resp.Error)
+	}
+	if resp := call(t, ipc.Request{Op: ipc.OpRequest, Service: "first", NeedMiB: 100}); resp.Message != "" {
+		t.Errorf("a fresh request carried message %q", resp.Message)
+	}
+}
