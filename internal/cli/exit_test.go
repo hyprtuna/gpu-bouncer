@@ -91,6 +91,11 @@ func fakeBusyComfyUI(t *testing.T) string {
 // environment at it and at a matching config file.
 func startDaemon(t *testing.T, services ...config.Service) {
 	t.Helper()
+	startDaemonWith(t, false, services...)
+}
+
+func startDaemonWith(t *testing.T, dryRun bool, services ...config.Service) {
+	t.Helper()
 	cfg := config.Config{
 		Policy:   config.Policy{VRAMFloorMiB: 512, PollInterval: config.Duration(time.Hour)},
 		Services: services,
@@ -98,7 +103,7 @@ func startDaemon(t *testing.T, services ...config.Service) {
 	if err := config.Validate(&cfg); err != nil {
 		t.Fatalf("config: %v", err)
 	}
-	d, err := daemon.New(cfg, fixedGPU{}, slog.New(slog.NewTextHandler(io.Discard, nil)), false)
+	d, err := daemon.New(cfg, fixedGPU{}, slog.New(slog.NewTextHandler(io.Discard, nil)), dryRun)
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
 	}
@@ -539,5 +544,47 @@ func TestStatusTrailerWithoutServices(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "No services are configured") {
 		t.Errorf("stdout lacks the no services line:\n%s", stdout)
+	}
+}
+
+// A dry-run daemon says so in the status trailer and in JSON, and a request
+// against it leaves no claim behind.
+func TestStatusNamesADryRunDaemon(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "c.toml")
+	if err := os.WriteFile(cfgPath, []byte("[policy]\nvram_floor_mib = 512\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvConfig, cfgPath)
+	startDaemonWith(t, true, config.Service{Name: "good", Adapter: config.AdapterOllama, Endpoint: fakeOllama(t, http.StatusOK), Priority: 10})
+
+	code, stdout, stderr := run("request", "good", "--need-mib", "100")
+	if code != 0 {
+		t.Fatalf("request: exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "dry-run mode") || !strings.Contains(stdout, "no claim was recorded") {
+		t.Errorf("request output = %q, want it to say the daemon is in dry-run mode and recorded nothing", stdout)
+	}
+
+	code, stdout, _ = run("status")
+	if code != 0 {
+		t.Fatalf("status: exit %d", code)
+	}
+	if !strings.Contains(stdout, "A daemon is running in dry-run mode: it plans and never acts.") {
+		t.Errorf("status lacks the dry-run trailer:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "Outstanding claims") {
+		t.Errorf("status lists a claim a dry-run daemon can never act on:\n%s", stdout)
+	}
+
+	_, stdout, _ = run("--json", "status")
+	var decoded struct {
+		DaemonRunning bool `json:"daemon_running"`
+		DaemonDryRun  bool `json:"daemon_dry_run"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("stdout is not JSON: %v", err)
+	}
+	if !decoded.DaemonRunning || !decoded.DaemonDryRun {
+		t.Errorf("daemon_running = %v, daemon_dry_run = %v; want both true", decoded.DaemonRunning, decoded.DaemonDryRun)
 	}
 }

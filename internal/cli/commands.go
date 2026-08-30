@@ -224,15 +224,19 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 
 	// The daemon is not needed for status, but whether one is running changes
 	// what the other commands will do, so it is worth a line.
-	daemonUp := false
+	daemonUp, daemonDry := false, false
 	if resp, err := ipc.Do(ctx, ipc.Request{Op: ipc.OpPing}); err == nil && resp.OK {
 		daemonUp = true
+		daemonDry = resp.DaemonDryRun != nil && *resp.DaemonDryRun
 		if claims, err := ipc.Do(ctx, ipc.Request{Op: ipc.OpStatus}); err == nil {
 			report.Claims = claims.Claims
 			report.Cooldowns = claims.Cooldowns
 		}
 	}
 	report.DaemonRunning = &daemonUp
+	if daemonUp {
+		report.DaemonDryRun = &daemonDry
+	}
 	report.Config = json.RawMessage("null")
 	if len(cfg.Sources) > 0 {
 		report.Config, _ = json.Marshal(strings.Join(cfg.Sources, ", "))
@@ -241,7 +245,7 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 	if g.asJSON {
 		return writeJSON(env, report)
 	}
-	printStatus(env, report, cfg.Sources, cfg.Policy.GPUIndex, daemonUp)
+	printStatus(env, report, cfg.Sources, cfg.Policy.GPUIndex, daemonUp, daemonDry)
 	return nil
 }
 
@@ -448,7 +452,7 @@ func gpuHeading(g ipc.GPUReport) string {
 	return heading
 }
 
-func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, daemonUp bool) {
+func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, daemonUp, daemonDry bool) {
 	out := env.Stdout
 
 	switch {
@@ -557,9 +561,12 @@ func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, d
 		fmt.Fprintln(out)
 	}
 
-	if daemonUp {
+	switch {
+	case daemonUp && daemonDry:
+		fmt.Fprintln(out, "A daemon is running in dry-run mode: it plans and never acts.")
+	case daemonUp:
 		fmt.Fprintln(out, "A daemon is running.")
-	} else {
+	default:
 		fmt.Fprintln(out, "No daemon is running: gpu-bouncer is observing only, and will not act.")
 	}
 	if len(sources) > 0 {
