@@ -534,11 +534,19 @@ func shortfallLine(resp ipc.Response) string {
 				freed = *last - *first
 			}
 		}
+	} else {
+		// Nothing ran, so nothing moved the figure the plan was built on,
+		// and freed stays 0 because no action ran rather than because the
+		// card could not be read. That figure is a reading the daemon took
+		// successfully: a plan built without one carries a zero target,
+		// which the already-free branch above returned on. The daemon
+		// measures target_met the same way.
+		measured = true
 	}
 	if !measured {
-		// The GPU could not be read either side of the plan. How much was
-		// freed is not known, and a confident "freed 0 MiB" would be a
-		// measurement nobody took.
+		// A reading was taken either side of the plan and at least one of
+		// them failed. How much was freed is not known, and a confident
+		// "freed 0 MiB" would be a measurement nobody took.
 		line := fmt.Sprintf("how much of the %s asked for was freed is not known: the GPU could not be read", mib(asked))
 		if resp.TargetMet != nil && !*resp.TargetMet {
 			line += ", target not met"

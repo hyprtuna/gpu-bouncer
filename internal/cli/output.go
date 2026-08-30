@@ -48,7 +48,8 @@ type actionOutput struct {
 	Plan     scheduler.Plan     `json:"plan"`
 	Executed []ipc.ActionResult `json:"executed"`
 	// FreeAfterMiB is the GPU's free VRAM read once after every action had
-	// finished, or null when nothing ran or the reading failed.
+	// finished, the reading the plan itself was built on when it had nothing
+	// to run, or null when a reading failed.
 	FreeAfterMiB *uint64 `json:"free_after_mib"`
 	// TargetMet is present on a request only: whether the free VRAM
 	// measured after every action reached the target.
@@ -116,6 +117,23 @@ func statusOutputOf(r ipc.Response) statusOutput {
 	return out
 }
 
+// planFreeAfter is the figure that measures a plan as a whole. The daemon
+// reads the GPU once every action has finished and sends that; a plan with
+// nothing to run has no such reading, and the figure that measures it is the
+// one the plan itself was built on, because nothing happened in between. It
+// stays null when a reading was taken and failed, and when the card could not
+// be read at all, which a plan reports as a zero total.
+func planFreeAfter(r ipc.Response) *uint64 {
+	if r.FreeAfterMiB != nil || len(r.Executed) > 0 {
+		return r.FreeAfterMiB
+	}
+	if plan := planOf(r.Plan); plan.TotalMiB > 0 {
+		free := plan.CurrentFreeMiB
+		return &free
+	}
+	return nil
+}
+
 // outputOf shapes a daemon reply for the command that made the request.
 func outputOf(op ipc.Op, r ipc.Response) any {
 	if op == ipc.OpRelease {
@@ -127,7 +145,7 @@ func outputOf(op ipc.Op, r ipc.Response) any {
 		Message:      r.Message,
 		Plan:         planOf(r.Plan),
 		Executed:     orEmpty(r.Executed),
-		FreeAfterMiB: r.FreeAfterMiB,
+		FreeAfterMiB: planFreeAfter(r),
 	}
 	if op == ipc.OpRequest {
 		out.TargetMet = r.TargetMet
