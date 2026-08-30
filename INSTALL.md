@@ -371,12 +371,16 @@ open it can ask the daemon to unload your models.
 ### When status says the source is sysfs
 
 ```
-  7104 MiB used of 12282 MiB, 5178 MiB free  (source: sysfs)
+GPU 0  NVIDIA device 0x2820  (PCI 0000:01:00.0, vendor 0x10de)
+  state unavailable  (source: sysfs)
+  sysfs exposes no VRAM counters for an NVIDIA card: reading it needs a gpu-bouncer build with cgo and the NVIDIA driver, see INSTALL.md
+Other GPUs, not arbitrated (policy.gpu_index = 0):
+  GPU 1  AMD device 0x1900  (PCI 0000:05:00.0, vendor 0x1002), 1149 MiB used of 2048 MiB
 ```
 
 `source: nvml` is the accurate path. `source: sysfs` means NVML could not be
-opened and gpu-bouncer fell back to reading amdgpu VRAM counters under
-`/sys/class/drm`. Three things cause it:
+opened and gpu-bouncer fell back to reading `/sys/class/drm`. Three things
+cause it:
 
 - The binary was built with `CGO_ENABLED=0`. go-nvml binds through cgo, so
   such a binary can never use NVML. Rebuild with cgo enabled.
@@ -387,10 +391,27 @@ opened and gpu-bouncer fell back to reading amdgpu VRAM counters under
 - There is no NVIDIA GPU. On an AMD card sysfs is the only source there is,
   and it is working as intended.
 
-What you lose on sysfs is per process VRAM accounting, which that source
-cannot answer and reports as unsupported rather than as an empty list. Total,
-used and free VRAM are still read, so arbitration still has the figures it
-makes decisions from.
+The sysfs source lists every DRM card that sits on a PCI device, in kernel
+order, and numbers them in that order. Virtual cards such as simpledrm are
+skipped. VRAM counters in sysfs exist only for the amdgpu driver, so an NVIDIA
+card is listed with its PCI address and vendor but marked unreadable, and it
+keeps its index. That matters on a laptop with an NVIDIA card and an AMD
+integrated GPU, which is the output above: the NVIDIA card is GPU 0, the
+integrated GPU is GPU 1, and an earlier gpu-bouncer that enumerated only
+amdgpu cards would have called the integrated GPU "GPU 0" and arbitrated its
+2 GiB carve-out on behalf of services that run on the NVIDIA card.
+
+When the arbitrated index is unreadable, `plan` reports it as the reason no
+action is safe, `gpu-bouncer daemon` refuses to start with the same reason,
+and `evict` and `request` refuse to act. The fix on such a machine is the
+cgo build plus the NVIDIA driver, not a different `gpu_index`: pointing
+`gpu_index` at the integrated GPU would make the daemon start, and then evict
+services over memory pressure on a card none of them use.
+
+What you lose on sysfs for a readable AMD card is per process VRAM
+accounting, which that source cannot answer and reports as unsupported rather
+than as an empty list. Total, used and free VRAM are read, so arbitration of
+that card has the figures it makes decisions from.
 
 ### GPU state unavailable
 

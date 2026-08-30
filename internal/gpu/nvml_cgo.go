@@ -5,6 +5,7 @@ package gpu
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -62,13 +63,19 @@ func (s *nvmlSource) Devices(ctx context.Context) ([]Device, error) {
 			TotalMiB: mem.Total / BytesPerMiB,
 			UsedMiB:  mem.Used / BytesPerMiB,
 		}
-		// Name and UUID are cosmetic. A driver that will not report them is
-		// not a reason to fail a status read.
+		// Name, UUID and the PCI address are identification. A driver that
+		// will not report them is not a reason to fail a status read.
 		if name, ret := nvml.DeviceGetName(handle); ret == nvml.SUCCESS {
 			dev.Name = name
 		}
 		if uuid, ret := nvml.DeviceGetUUID(handle); ret == nvml.SUCCESS {
 			dev.UUID = uuid
+		}
+		if pci, ret := nvml.DeviceGetPciInfo(handle); ret == nvml.SUCCESS {
+			dev.BusID = nvmlBusID(pci)
+			// PciDeviceId packs the device id in the high half and the
+			// vendor id in the low half.
+			dev.Vendor = fmt.Sprintf("0x%04x", pci.PciDeviceId&0xffff)
 		}
 		devices = append(devices, dev)
 	}
@@ -118,4 +125,22 @@ func (s *nvmlSource) Close() error {
 		return fmt.Errorf("nvml shutdown: %s", nvml.ErrorString(ret))
 	}
 	return nil
+}
+
+// nvmlBusID turns NVML's fixed size, NUL terminated bus id into a string in
+// the same spelling sysfs uses, so the two sources can be compared by eye.
+// NVML writes the domain as eight hex digits; sysfs uses four.
+func nvmlBusID(pci nvml.PciInfo) string {
+	var b []byte
+	for _, c := range pci.BusId {
+		if c == 0 {
+			break
+		}
+		b = append(b, byte(c))
+	}
+	id := strings.ToLower(string(b))
+	if domain, rest, ok := strings.Cut(id, ":"); ok && len(domain) > 4 && strings.TrimLeft(domain[:len(domain)-4], "0") == "" {
+		id = domain[len(domain)-4:] + ":" + rest
+	}
+	return id
 }

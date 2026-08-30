@@ -59,6 +59,13 @@ func New(cfg config.Config, source gpu.Source, log *slog.Logger, dryRun bool) (*
 
 // Run serves the socket and the poll loop until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context, socketPath string) error {
+	// Without a VRAM reading the scheduler refuses every action, so a daemon
+	// that cannot read its arbitrated GPU could only ever do nothing. Refusing
+	// here, with the reason, beats running inert.
+	if _, err := d.observer.Device(ctx); err != nil {
+		return fmt.Errorf("refusing to start, cannot read the arbitrated GPU: %w", err)
+	}
+
 	listener, err := ipc.Listen(socketPath)
 	if err != nil {
 		return err
@@ -258,15 +265,12 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request) ipc.Response {
 
 func (d *Daemon) handleStatus(ctx context.Context) ipc.Response {
 	resp := ipc.Response{OK: true}
-	device, known := d.observer.Device(ctx)
-	resp.GPU = &ipc.GPUReport{
-		Known:    known,
-		Index:    device.Index,
-		Name:     device.Name,
-		TotalMiB: device.TotalMiB,
-		UsedMiB:  device.UsedMiB,
-		FreeMiB:  device.FreeMiB(),
+	device, err := d.observer.Device(ctx)
+	report := ipc.GPUReportOf(device, "")
+	if err != nil {
+		report.Known, report.Error = false, err.Error()
 	}
+	resp.GPU = &report
 	for _, s := range d.observer.Statuses(ctx) {
 		report := ipc.ServiceReport{
 			Name:          s.Service.Name,

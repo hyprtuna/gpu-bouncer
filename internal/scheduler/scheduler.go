@@ -92,6 +92,8 @@ type Observation struct {
 	// be read at all, in which case the scheduler refuses to act.
 	Device      gpu.Device
 	DeviceKnown bool
+	// DeviceErr says why DeviceKnown is false, so the refusal can be explained.
+	DeviceErr string
 
 	Services []ServiceState
 	Claims   []Claim
@@ -122,6 +124,16 @@ type Plan struct {
 	Notes []string
 }
 
+// deviceUnknownNote is the one reason every plan gives for refusing without a
+// VRAM reading, with the cause appended when the observer recorded one.
+func (o Observation) deviceUnknownNote() string {
+	note := "GPU state could not be read, so no action is safe"
+	if o.DeviceErr != "" {
+		note += ": " + o.DeviceErr
+	}
+	return note
+}
+
 // Empty reports whether the plan would change anything.
 func (p Plan) Empty() bool { return len(p.Actions) == 0 }
 
@@ -140,7 +152,7 @@ func (p Plan) ExpectedFreeMiB() uint64 {
 func Decide(cfg config.Config, obs Observation) Plan {
 	plan := Plan{Trigger: TriggerNone}
 	if !obs.DeviceKnown {
-		plan.Notes = append(plan.Notes, "GPU state could not be read, so no action is safe")
+		plan.Notes = append(plan.Notes, obs.deviceUnknownNote())
 		return plan
 	}
 	plan.CurrentFreeMiB = obs.Device.FreeMiB()

@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/hyprtuna/gpu-bouncer/internal/gpu"
 	"github.com/hyprtuna/gpu-bouncer/internal/scheduler"
 )
 
@@ -77,10 +78,23 @@ type GPUReport struct {
 	Known    bool   `json:"known"`
 	Index    int    `json:"index"`
 	Name     string `json:"name,omitempty"`
+	BusID    string `json:"bus_id,omitempty"`
+	Vendor   string `json:"vendor,omitempty"`
 	Source   string `json:"source,omitempty"`
 	TotalMiB uint64 `json:"total_mib"`
 	UsedMiB  uint64 `json:"used_mib"`
 	FreeMiB  uint64 `json:"free_mib"`
+	// Error says why Known is false: the source failed, the index names no
+	// device, or the device is present but its memory cannot be read.
+	Error string `json:"error,omitempty"`
+}
+
+// GPUReportOf fills a report from a device reading.
+func GPUReportOf(dev gpu.Device, source string) GPUReport {
+	return GPUReport{
+		Known: dev.Unreadable == "", Index: dev.Index, Name: dev.Name, BusID: dev.BusID, Vendor: dev.Vendor,
+		Source: source, TotalMiB: dev.TotalMiB, UsedMiB: dev.UsedMiB, FreeMiB: dev.FreeMiB(), Error: dev.Unreadable,
+	}
 }
 
 // ServiceReport is one service as the daemon last saw it.
@@ -104,7 +118,10 @@ type Response struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 
+	// GPU is the arbitrated device. Devices is every device the source sees,
+	// so that a wrong gpu_index can be diagnosed from the output alone.
 	GPU      *GPUReport      `json:"gpu,omitempty"`
+	Devices  []GPUReport     `json:"devices,omitempty"`
 	Services []ServiceReport `json:"services,omitempty"`
 	Plan     *scheduler.Plan `json:"plan,omitempty"`
 	Executed []ActionResult  `json:"executed,omitempty"`
