@@ -185,7 +185,14 @@ type ClaimReport struct {
 // ConfigReport identifies the configuration a daemon is running on.
 type ConfigReport struct {
 	// Path is the file or files loaded, joined the way status prints them.
-	Path     string    `json:"path"`
+	Path string `json:"path"`
+	// Paths is the same list unjoined, so a client can re-read exactly the
+	// files the daemon read rather than guess at them by splitting a string.
+	// A daemon too old to send it still sends Path.
+	Paths []string `json:"paths,omitempty"`
+	// SHA256 is a digest over the contents of those files, in load order,
+	// and nothing else. A client recomputes it over the same paths with
+	// config.ContentDigest.
 	SHA256   string    `json:"sha256"`
 	LoadedAt time.Time `json:"loaded_at"`
 }

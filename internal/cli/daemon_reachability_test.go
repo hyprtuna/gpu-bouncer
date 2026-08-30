@@ -13,7 +13,7 @@ import (
 // away: it accepts, reads, and closes without answering.
 func acceptAndClose(t *testing.T) string {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "gb.sock")
+	socket := filepath.Join(shortDir(t), "gb.sock")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestAConnectedFailureIsNotBlamedOnAMissingDaemon(t *testing.T) {
 // The absent case is unchanged: nothing listening anywhere still says so, and
 // still says how to fix it.
 func TestNoDaemonStillAdvisesStartingOne(t *testing.T) {
-	t.Setenv(ipc.EnvSocket, filepath.Join(t.TempDir(), "absent.sock"))
+	t.Setenv(ipc.EnvSocket, filepath.Join(shortDir(t), "absent.sock"))
 
 	code, _, stderr := run("evict", "x")
 	if code != 1 {

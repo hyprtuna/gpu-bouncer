@@ -247,15 +247,34 @@ for the daemon alone.
 The daemon reads the config files once, at startup, and never again. Every
 client invocation reads them afresh, so after an edit `status` shows the new
 file while `plan`, `request`, `release` and `evict` are answered by a daemon
-that still holds the old one. `status` notices: when the files it read differ
-from what the daemon loaded, it ends with
+that still holds the old one. `status` notices, and it ends with
 
 ```
 the daemon loaded a different config (/home/you/.config/gpu-bouncer/config.toml, loaded 2026-08-30T12:00:00+03:00); restart it to apply your edit
 ```
 
-and `--json status` sets `config_stale` to `true` next to `daemon_config`,
-which carries the path, a SHA-256 of the loaded files and the load time.
+What is compared is exactly this: the daemon reports which files it loaded
+and a SHA-256 over their contents, and `status` re-reads **those same files**
+and hashes them the same way. The comparison is over bytes, so a `touch` or a
+byte for byte rewrite is not an edit, and a changed comment is, because
+nothing reads the file semantically to decide.
+
+The files `status` itself resolved play no part in it. A client with its own
+`--config`, its own `XDG_CONFIG_HOME`, or no config file at all is looking at
+a different configuration, not at a stale daemon, and is never told to
+restart one. A system daemon plus a per user client overlay is a supported
+setup for exactly that reason.
+
+`--json status` carries the answer in `config_stale` next to `daemon_config`,
+which holds the joined path, the list of paths, the digest and the load time.
+`config_stale` is `null` when the answer is not known: no daemon answered,
+the daemon is too old to report what it loaded, or one of the files it loaded
+cannot be read now. A daemon that loaded no file at all says so instead:
+
+```
+the daemon loaded no config file
+```
+
 Restart the daemon to apply the edit:
 
 ```sh
@@ -369,8 +388,8 @@ an unknown one.
 | `cooldowns` | list | services the daemon's loop is leaving alone: `service`, `until`, `reason`; empty without a daemon |
 | `daemon_running` | bool | whether a daemon answered |
 | `daemon_dry_run` | bool | whether that daemon plans and never acts |
-| `daemon_config` | object or null | what the daemon loaded: `path`, `sha256`, `loaded_at`; null without a daemon |
-| `config_stale` | bool | true when the files this command read differ from `daemon_config` |
+| `daemon_config` | object or null | what the daemon loaded: `path` (joined), `paths` (the list), `sha256` (over their contents), `loaded_at`; null without a daemon |
+| `config_stale` | bool or null | true when the files the daemon loaded have changed since it loaded them; null when that is not known |
 | `config` | string or null | the file(s) this command read; null when none was found |
 
 `plan`: `{"ok": true, "plan": {...}}` where `plan` has `trigger`,

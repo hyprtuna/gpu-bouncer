@@ -234,6 +234,7 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 	// The daemon is not needed for status, but whether one is running changes
 	// what the other commands will do, so it is worth a line.
 	daemonUp, daemonDry := false, false
+	var configNote string
 	if resp, err := ipc.Do(ctx, ipc.Request{Op: ipc.OpPing}); err == nil && resp.OK {
 		daemonUp = true
 		daemonDry = resp.DaemonDryRun != nil && *resp.DaemonDryRun
@@ -241,13 +242,12 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 			report.Claims = claims.Claims
 			report.Cooldowns = claims.Cooldowns
 		}
-		// The daemon never reloads. If the files this command just read
-		// differ from what the daemon loaded, every other command is
-		// talking to a config the user no longer sees.
+		// The daemon never reloads. If the files it loaded have changed
+		// since, every other command is answered from a config the user no
+		// longer sees.
 		if resp.DaemonConfig != nil {
 			report.DaemonConfig = resp.DaemonConfig
-			stale := resp.DaemonConfig.SHA256 != cfg.Hash
-			report.ConfigStale = &stale
+			report.ConfigStale, configNote = configDrift(*resp.DaemonConfig)
 		}
 	}
 	report.DaemonRunning = &daemonUp
@@ -262,8 +262,49 @@ func runStatus(ctx context.Context, args []string, g *globals, env Env) error {
 	if g.asJSON {
 		return writeJSON(env, statusOutputOf(report))
 	}
-	printStatus(env, report, cfg.Sources, cfg.Policy.GPUIndex, daemonUp, daemonDry)
+	printStatus(env, report, cfg.Sources, cfg.Policy.GPUIndex, daemonUp, daemonDry, configNote)
 	return nil
+}
+
+// configDrift answers the one question the staleness warning is about: have
+// the files the daemon loaded changed since it loaded them? It re-reads the
+// daemon's own paths, not this client's.
+//
+// Comparing the two resolved sets was wrong in both directions. A client with
+// a different --config, a different XDG_CONFIG_HOME, or no config file at all
+// was permanently "stale" against a daemon whose files had never been touched,
+// and the remedy it printed, restart the daemon, could never take effect. A
+// system daemon plus a per user client overlay is the documented setup and hit
+// that on every status.
+//
+// The returned pointer is nil when the question could not be answered, which
+// is not the same as answering no: the sentence says which it was.
+func configDrift(report ipc.ConfigReport) (*bool, string) {
+	paths := report.Paths
+	if len(paths) == 0 && report.Path != "" {
+		// A daemon too old to send the list still sends the joined form,
+		// which status itself built with this separator.
+		paths = strings.Split(report.Path, ", ")
+	}
+	if len(paths) == 0 {
+		// Not stale: a daemon that loaded no file cannot be running on an
+		// older edit of one. Worth saying, because it means the daemon is
+		// on built in defaults whatever this client just read.
+		fresh := false
+		return &fresh, "the daemon loaded no config file"
+	}
+	joined := strings.Join(paths, ", ")
+	now, err := config.ContentDigest(paths)
+	if err != nil {
+		return nil, fmt.Sprintf("the config the daemon loaded cannot be read now (%v), "+
+			"so whether it is running on an older edit cannot be told", err)
+	}
+	stale := now != report.SHA256
+	if !stale {
+		return &stale, ""
+	}
+	return &stale, fmt.Sprintf("the daemon loaded a different config (%s, loaded %s); restart it to apply your edit",
+		joined, report.LoadedAt.Format(time.RFC3339))
 }
 
 // runPlan shows what would happen now. It asks the daemon when one is running,
@@ -509,7 +550,7 @@ func gpuHeading(g ipc.GPUReport) string {
 	return heading
 }
 
-func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, daemonUp, daemonDry bool) {
+func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, daemonUp, daemonDry bool, configNote string) {
 	out := env.Stdout
 
 	switch {
@@ -629,9 +670,8 @@ func printStatus(env Env, report ipc.Response, sources []string, gpuIndex int, d
 	if len(sources) > 0 {
 		fmt.Fprintf(out, "Config: %s\n", strings.Join(sources, ", "))
 	}
-	if report.ConfigStale != nil && *report.ConfigStale && report.DaemonConfig != nil {
-		fmt.Fprintf(out, "the daemon loaded a different config (%s, loaded %s); restart it to apply your edit\n",
-			report.DaemonConfig.Path, report.DaemonConfig.LoadedAt.Format(time.RFC3339))
+	if configNote != "" {
+		fmt.Fprintln(out, configNote)
 	}
 }
 

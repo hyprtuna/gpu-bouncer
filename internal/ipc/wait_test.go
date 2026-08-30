@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,9 +39,25 @@ func TestWaitForIsTheLongestActionPlusSlack(t *testing.T) {
 
 // serveOnce answers one connection with the lines given, then does what after
 // says. It stands in for a daemon that goes quiet or goes away.
+// shortDir is a temporary directory for a Unix socket. t.TempDir folds the
+// test's name and TMPDIR into its path, and a socket path is capped at 107
+// bytes, so a long test name on a machine with a long TMPDIR produces a
+// socket that cannot be bound. This keeps the path short whatever the test
+// is called, which for this package is the difference between testing the
+// error wording and testing the path length guard by accident.
+func shortDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func serveOnce(t *testing.T, lines []Response, hold time.Duration) string {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "gb.sock")
+	socket := filepath.Join(shortDir(t), "gb.sock")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +149,7 @@ func TestClosedConnectionIsNotReportedAsAbsent(t *testing.T) {
 // Nothing listening anywhere is still the plain "no daemon" error, with the
 // sockets it tried.
 func TestNothingListeningIsStillNoDaemon(t *testing.T) {
-	t.Setenv(EnvSocket, filepath.Join(t.TempDir(), "absent.sock"))
+	t.Setenv(EnvSocket, filepath.Join(shortDir(t), "absent.sock"))
 	_, err := Exchange(context.Background(), Request{Op: OpEvict, Service: "x", PlanFirst: true})
 	if !errors.Is(err, ErrNoDaemon) {
 		t.Fatalf("error = %v, want ErrNoDaemon", err)

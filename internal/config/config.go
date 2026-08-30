@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -142,9 +143,10 @@ type Config struct {
 	// itself settable from a config file.
 	Sources []string `toml:"-"`
 	// Hash is a SHA-256 over the bytes of every file in Sources, in load
-	// order, and LoadedAt is when they were read. The daemon reports both, so
-	// a client that read the files itself can tell whether the daemon is
-	// still running on an older edit.
+	// order, and LoadedAt is when they were read. The daemon reports Sources
+	// and Hash, so a client can re-read those same files and tell whether
+	// they have changed since the daemon read them. See ContentDigest for
+	// why the paths are not part of it.
 	Hash     string    `toml:"-"`
 	LoadedAt time.Time `toml:"-"`
 }
@@ -346,12 +348,7 @@ func LoadFrom(paths []string) (Config, error) {
 			return Config{}, err
 		}
 		cfg.Sources = append(cfg.Sources, path)
-		// The path is part of the digest: the same bytes moved to another
-		// file are a different configuration to the daemon that loaded it.
-		digest.Write([]byte(path))
-		digest.Write([]byte{0})
-		digest.Write(data)
-		digest.Write([]byte{0})
+		writeDigest(digest, data)
 	}
 	if err := Validate(&cfg); err != nil {
 		return Config{}, err
@@ -359,6 +356,38 @@ func LoadFrom(paths []string) (Config, error) {
 	cfg.Hash = hex.EncodeToString(digest.Sum(nil))
 	cfg.LoadedAt = time.Now()
 	return cfg, nil
+}
+
+// writeDigest folds one file's bytes into a content digest. The separator
+// keeps two files from hashing the same as one file holding both.
+func writeDigest(digest hash.Hash, data []byte) {
+	digest.Write(data)
+	digest.Write([]byte{0})
+}
+
+// ContentDigest hashes the bytes of the named files, in order, exactly as
+// Load hashes the files it reads. A client compares the digest a daemon
+// reports against this over the daemon's own paths, which answers the only
+// question worth asking: have the files the daemon loaded changed since it
+// loaded them?
+//
+// The paths are deliberately not part of the digest. Folding them in made
+// every client that resolved a different set of files look permanently
+// stale, including the documented setup of a system daemon and a per user
+// client overlay, where the daemon is correct never to read the user's file
+// and no restart could ever change that.
+func ContentDigest(paths []string) (string, error) {
+	digest := sha256.New()
+	for _, path := range paths {
+		// os.ReadFile's error already names the file, and this one is
+		// quoted into a sentence that names the rest.
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		writeDigest(digest, data)
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 // mergeFile decodes one file and layers it onto cfg.

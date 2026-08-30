@@ -130,14 +130,15 @@ func startDaemonFromConfig(t *testing.T, cfg config.Config, dryRun bool) {
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
 	}
-	socket := filepath.Join(t.TempDir(), "gb.sock")
+	socket := filepath.Join(shortDir(t), "gb.sock")
 	t.Setenv(ipc.EnvSocket, socket)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	runErr := make(chan error, 1)
 	go func() {
 		defer close(done)
-		_ = d.Run(ctx, socket)
+		runErr <- d.Run(ctx, socket)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -145,6 +146,13 @@ func startDaemonFromConfig(t *testing.T, cfg config.Config, dryRun bool) {
 	})
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		// A daemon that gave up says why. Waiting out the full deadline and
+		// reporting only that nothing answered hides the reason.
+		select {
+		case err := <-runErr:
+			t.Fatalf("the daemon exited instead of answering on %s: %v", socket, err)
+		default:
+		}
 		pingCtx, pingCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		resp, err := ipc.Do(pingCtx, ipc.Request{Op: ipc.OpPing})
 		pingCancel()
@@ -153,7 +161,22 @@ func startDaemonFromConfig(t *testing.T, cfg config.Config, dryRun bool) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("daemon never answered")
+	t.Fatalf("daemon never answered on %s", socket)
+}
+
+// shortDir is a temporary directory for a Unix socket. t.TempDir folds the
+// test's name and TMPDIR into its path, and a socket path is capped at 107
+// bytes, so a long subtest name on a machine with a long TMPDIR produces a
+// socket that cannot be bound and a daemon that never answers. This keeps
+// the path short whatever the test is called.
+func shortDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 func run(args ...string) (code int, stdout, stderr string) {
@@ -181,7 +204,7 @@ func TestExitCodesAndFirstLines(t *testing.T) {
 	if err := os.WriteFile(emptyConfig, []byte("[policy]\nvram_floor_mib = 512\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	noSocket := filepath.Join(t.TempDir(), "none.sock")
+	noSocket := filepath.Join(shortDir(t), "none.sock")
 
 	tests := []struct {
 		name       string
@@ -374,7 +397,7 @@ func TestJSONStatusCarriesDaemonAndConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(config.EnvConfig, cfgPath)
-	t.Setenv(ipc.EnvSocket, filepath.Join(t.TempDir(), "none.sock"))
+	t.Setenv(ipc.EnvSocket, filepath.Join(shortDir(t), "none.sock"))
 
 	code, stdout, stderr := run("--json", "status")
 	if code != 0 {
@@ -518,7 +541,7 @@ func TestExitCodesAgainstADaemon(t *testing.T) {
 func TestPlanJSONKeysAreSnakeCase(t *testing.T) {
 	t.Setenv(config.EnvConfig, "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv(ipc.EnvSocket, filepath.Join(t.TempDir(), "none.sock"))
+	t.Setenv(ipc.EnvSocket, filepath.Join(shortDir(t), "none.sock"))
 	code, stdout, stderr := run("--json", "plan")
 	if code != 0 {
 		t.Fatalf("exit code = %d: %s", code, stderr)
@@ -549,7 +572,7 @@ func TestStatusTrailerWithoutServices(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(config.EnvConfig, cfgPath)
-	t.Setenv(ipc.EnvSocket, filepath.Join(t.TempDir(), "none.sock"))
+	t.Setenv(ipc.EnvSocket, filepath.Join(shortDir(t), "none.sock"))
 
 	code, stdout, stderr := run("status")
 	if code != 0 {
@@ -704,7 +727,7 @@ func TestJSONShapesHaveEveryKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(config.EnvConfig, cfgPath)
-	t.Setenv(ipc.EnvSocket, filepath.Join(t.TempDir(), "none.sock"))
+	t.Setenv(ipc.EnvSocket, filepath.Join(shortDir(t), "none.sock"))
 
 	_, stdout, _ := run("--json", "status")
 	var status map[string]json.RawMessage
