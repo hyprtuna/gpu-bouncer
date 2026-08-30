@@ -1,0 +1,42 @@
+# System wide gpu-bouncer. Use this variant when the services it arbitrates are
+# themselves system services, or when it needs to stop a system unit.
+#
+#   sudo install -Dm644 gpu-bouncer.service /etc/systemd/system/gpu-bouncer.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now gpu-bouncer
+#
+# The control socket lands in /run/gpu-bouncer/gpu-bouncer.sock with mode 0660,
+# owned by root. Commands that change state therefore need root as well. On a
+# single user desktop the user unit is usually the better fit.
+
+[Unit]
+Description=gpu-bouncer, arbitrates one GPU between local AI services
+Documentation=https://github.com/hyprtuna/gpu-bouncer
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gpu-bouncer daemon
+Restart=on-failure
+RestartSec=5s
+
+# Creates and owns /run/gpu-bouncer, and removes it on stop.
+RuntimeDirectory=gpu-bouncer
+RuntimeDirectoryMode=0755
+
+# Modest hardening. It is deliberately not stricter than this: the
+# systemd-unit adapter has to reach the system manager to stop a unit, and
+# NVML has to reach the NVIDIA device nodes. Tightening either of those is
+# what breaks this service in practice.
+NoNewPrivileges=yes
+ProtectHome=read-only
+ProtectSystem=full
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,67 @@
+# gpu-bouncer configuration.
+#
+# Copy to one of:
+#   /etc/gpu-bouncer/config.toml               (system wide)
+#   ~/.config/gpu-bouncer/config.toml          (per user, layered on top)
+#
+# Only services listed here are ever observed or acted on. A service that is
+# not in this file is invisible to gpu-bouncer, whatever it is doing to the GPU.
+
+[policy]
+# Free VRAM that gpu-bouncer tries to keep available, in MiB. Reactive mode
+# engages when free VRAM drops below this.
+vram_floor_mib = 2048
+
+# Act without being asked. With this off, gpu-bouncer only ever acts on an
+# explicit "gpu-bouncer request" or "gpu-bouncer evict". Start with it off,
+# watch "gpu-bouncer plan" for a while, then turn it on.
+reactive = false
+
+# How often the daemon samples VRAM and probes services.
+poll_interval = "5s"
+
+# The service assumed to want the GPU when nothing has explicitly asked.
+# Reactive mode defends it. Leave unset to defend whichever configured service
+# is up and has the highest priority.
+# default_workload = "ollama"
+
+# Which GPU to arbitrate. v0.1 arbitrates one.
+gpu_index = 0
+
+# Priority is an integer and higher wins. Services at equal priority never
+# evict one another.
+
+[[service]]
+name = "ollama"
+adapter = "ollama"
+endpoint = "http://127.0.0.1:11434"
+priority = 50
+# Ollama is released by asking it to expire its loaded models, which needs no
+# extra permission. allow_stop is only consulted for systemd-unit services.
+timeout = "5s"
+
+[[service]]
+name = "comfyui"
+adapter = "comfyui"
+endpoint = "http://127.0.0.1:8188"
+priority = 20
+timeout = "10s"
+
+# llama-swap supervises its own backends. gpu-bouncer can ask it to unload
+# them, which it does synchronously.
+# [[service]]
+# name = "llamaswap"
+# adapter = "llama-swap"
+# endpoint = "http://127.0.0.1:9292"
+# priority = 30
+
+# A service with no VRAM API of its own can still be managed at the unit level,
+# but only if you say so explicitly. Without allow_stop = true, gpu-bouncer
+# will observe this service and never touch it.
+# [[service]]
+# name = "sdnext"
+# adapter = "systemd-unit"
+# unit = "sdnext.service"
+# user_unit = true
+# priority = 10
+# allow_stop = true

@@ -1,0 +1,23 @@
+# Per user gpu-bouncer. This is the right variant on a desktop where Ollama and
+# ComfyUI run as your own user.
+#
+#   install -Dm644 gpu-bouncer-user.service ~/.config/systemd/user/gpu-bouncer.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now gpu-bouncer
+#
+# The control socket lands in $XDG_RUNTIME_DIR/gpu-bouncer.sock, owned by you,
+# so gpu-bouncer request and gpu-bouncer evict work without root.
+
+[Unit]
+Description=gpu-bouncer, arbitrates one GPU between local AI services
+Documentation=https://github.com/hyprtuna/gpu-bouncer
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/gpu-bouncer daemon
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
