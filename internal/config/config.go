@@ -16,7 +16,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -189,7 +188,10 @@ type Bound struct {
 	Min int64
 	// Max is the largest legal value, inclusive. Zero means no upper bound.
 	Max int64
-	// Signed marks a key that is negative by design and has no lower bound.
+	// Signed marks a key that is negative by design and has no range at all.
+	// Min and Max are not read for it: the only value a file can write that
+	// such a key refuses is one the typed decode refuses first, which for an
+	// int64 field is a literal outside int64.
 	Signed bool
 }
 
@@ -200,7 +202,7 @@ var NumericBounds = []Bound{
 	{Table: "policy", Key: "gpu_index", Min: 0},
 	{Table: "policy", Key: "poll_interval", Duration: true, Min: int64(MinPollInterval)},
 	{Table: "policy", Key: "action_cooldown", Duration: true, Min: 1},
-	{Table: "service", Key: "priority", Signed: true, Min: math.MinInt64},
+	{Table: "service", Key: "priority", Signed: true},
 	{Table: "service", Key: "timeout", Duration: true, Min: 1},
 	{Table: "service", Key: "drain_timeout", Duration: true, Min: 1, Max: int64(MaxDrainTimeout)},
 }
@@ -220,11 +222,18 @@ func checkBound(path, label string, b Bound, raw any) error {
 	if b.Duration {
 		text, ok := raw.(string)
 		if !ok {
-			return nil // the typed decode reports the type error
+			// A bare number is not a type error the typed decode will
+			// catch: TOML hands an integer to a TextUnmarshaler as its
+			// digits, and time.ParseDuration accepts a unitless "0". So
+			// poll_interval = 0 used to decode to zero, skip this bound
+			// because the raw value is not a string, and be replaced by
+			// the default, while "0s" was refused.
+			return fmt.Errorf("config %s: %s must be a duration string such as %q, got %v",
+				path, name, "5s", raw)
 		}
 		d, err := time.ParseDuration(text)
 		if err != nil {
-			return nil // likewise
+			return nil // the typed decode reports the parse error
 		}
 		switch {
 		case b.Min == 1 && d <= 0:
@@ -549,7 +558,9 @@ var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 // config without touching the filesystem.
 func Validate(cfg *Config) error {
 	// These can only be non positive in a Config built in code without going
-	// through Defaults; a file that sets them so is refused in mergeFile.
+	// through Defaults. Every spelling a file could use is refused in
+	// mergeFile, bare numbers included, so no value a file sets is ever
+	// replaced here by the default it was written to override.
 	if cfg.Policy.PollInterval <= 0 {
 		cfg.Policy.PollInterval = Duration(5 * time.Second)
 	}

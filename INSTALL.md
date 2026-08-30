@@ -153,7 +153,9 @@ service a `timeout` of `5s` and a `drain_timeout` of `30s`. A number outside
 its range is an error, not a request for the default: a duration of zero or
 less, a `poll_interval` under `1s`, a `drain_timeout` over `10m`, or a
 negative `vram_floor_mib`, `min_effect_mib` or `gpu_index`. `priority` is the
-one key that may be negative.
+one key that may be negative. Every duration key takes a quoted duration
+string, so `poll_interval = 0` is refused as a wrong type rather than read as
+zero and replaced.
 
 With `reactive = false`, which is the default, gpu-bouncer never acts on its
 own. It acts only when you run `gpu-bouncer request` or `gpu-bouncer evict`.
