@@ -7,6 +7,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-30
+
+A fix round after the release audit of 0.1.0. Nothing here changes the
+config file format for an existing file: the new keys all have defaults.
+
+### Fixed
+
+- **The sysfs source silently arbitrated a different physical GPU.** It
+  enumerated only amdgpu cards and numbered them by slice position, so on a
+  laptop with an NVIDIA card and an AMD integrated GPU a `CGO_ENABLED=0`
+  build, or a cgo build whose NVML failed to load, called the integrated GPU
+  "GPU 0" and would have evicted services over memory pressure on a card none
+  of them use. The source now lists every DRM card backed by a PCI device, in
+  kernel order, and keeps a card whose VRAM it cannot read (an NVIDIA card, or
+  an AMD card without `mem_info_vram_total`) in the numbering as present and
+  unreadable, with the reason. When the arbitrated index is unreadable,
+  `plan` says why, `request` and `evict` refuse, and `daemon` refuses to
+  start with a message that says an NVIDIA card needs the cgo build and the
+  driver.
+- **A failed action exited 0.** `request`, `evict` and `release` now exit 1
+  when any executed action carries an error, the text output ends with
+  `N of M actions failed`, and the JSON response has `ok` false. An action the
+  daemon declined with a reason is not a failure.
+- **Reactive mode could repeat a useless action forever.** A service that
+  reloaded the moment it was released was released once per poll, each
+  logged with the same free VRAM before and after; for llama-swap that loop
+  kills in flight requests. After an action whose measured gain is below
+  `policy.min_effect_mib`, or that failed, the service now enters a cooldown
+  of `policy.action_cooldown` during which the daemon's own plans skip it
+  with a note naming when the cooldown ends. `request` and `evict` bypass it,
+  and `status` lists active cooldowns.
+- **The HTTP client trusted the far end too much.** A 3xx was followed to a
+  host the config never named and its answer accepted; it is now an error
+  naming the `Location`. A body over 4 MiB was silently truncated and its
+  first 4 MiB decoded as success; it now fails with `response larger than
+  4 MiB`. An endpoint with a password in it was accepted, sent as Basic auth
+  and echoed into every error string; it is now a config error that points
+  llama-swap users at `GPU_BOUNCER_LLAMA_SWAP_API_KEY`, and every URL in an
+  error string is redacted regardless.
+- **The ComfyUI adapter ignored `gpu_index`** and always read torch device 0.
+  It now reads the arbitrated device, assuming the torch device ordinal
+  equals the NVML index.
+- **An Ollama release that never drained blocked for a hardcoded 30 s and
+  was reported as acted.** The wait is now bounded by the new per service
+  `drain_timeout`, and a drain that times out is a failed action with
+  `acted` false and the error `still loaded after 30s`.
+- **Three scheduler guarantees the documentation made and the code did not
+  keep.** `evict` and `evict --all-except` acted without a VRAM reading; they
+  now refuse like everything else. A service passed over for its priority,
+  for being down, for a failed probe or for holding nothing produced no note;
+  every passed over service now gets one, with the reason.
+  `evict --all-except` with a misspelled name reported `Free VRAM: 0 MiB`;
+  it now reports the real figure. A plan's expected free VRAM could exceed
+  the card's total; it is now capped at it.
+- **A `gpu_index` past the device count was accepted and left `status`
+  printing `state unavailable` with no reason.** It now names the index and
+  the device count, `status` prints it, and `daemon` refuses to start on it.
+- **`timeout` and `poll_interval` of zero or less were silently replaced by
+  the default.** They are now hard errors naming the key and the file, as are
+  `drain_timeout` and `action_cooldown`.
+- **`status` omitted the daemon line and `Config:` when no services were
+  configured**, so an empty list could not be traced to the file that
+  produced it. Both are printed regardless.
+- **The control socket was created at 0777 masked by the umask and then
+  chmod'ed to 0660**, world connectable for a moment under a permissive
+  umask. It is now 0660 from the instant it exists.
+- **A `go install` build reported its version as `dev`.** It now reports the
+  module version Go recorded in the binary; the release ldflag keeps
+  precedence.
+- **The README transcript was not what was recorded.** It is re-recorded with
+  every printed command being the command run, and pasted in unedited.
+- **`gpu-bouncer --help` printed the usage twice, a flag parse error was
+  printed twice around a usage dump, and `version` ignored its arguments.**
+  The usage is printed once, a flag error is one line with exit 1, and
+  `version` parses its flags and rejects positional arguments.
+- The `unload_all_models` citation in the ComfyUI adapter pointed at the
+  wrong line of `model_management.py`.
+- The v0.1.0 release body was GitHub's generated text naming one pull
+  request; it has been replaced with the 0.1.0 section of this file.
+
+### Changed
+
+- With `--json`, every error is now a JSON object `{"ok": false, "error":
+  "..."}` on stdout, with the same exit code as before. The `plan` object
+  uses snake_case keys (`trigger`, `beneficiary`, `current_free_mib`,
+  `target_free_mib`, `total_mib`, `actions`, `notes`) like every sibling
+  object; `--json version` prints `{"version": "..."}`; `--json status`
+  gains `daemon_running`, `config` and a `devices` list.
+- `--json`, `--verbose` and `--dry-run` are accepted after every command
+  name, as no ops where they have no effect.
+- `evict <name>` and `release <name>` for a service the config does not name
+  exit 1 with the message `request` already used, and `evict --all-except`
+  with an unknown name keeps refusing and exits 1.
+- `status` prints each device's PCI bus id and vendor, and lists every other
+  device the source sees under the arbitrated one.
+- An unknown key in a `[[service]]` block is reported against the service
+  by name.
+- The release workflow publishes the CHANGELOG section for the tag as the
+  release body, and fails when the section is missing or the top released
+  section is a different version. `actions/checkout` and `actions/setup-go`
+  are on v7 and `softprops/action-gh-release` on v3.
+- The public `.gitignore` no longer names local tooling.
+
+### Added
+
+- `--version`, an alias for the `version` command.
+- Per service `drain_timeout` (default `"30s"`).
+- `policy.min_effect_mib` (default `64`) and `policy.action_cooldown`
+  (default `"60s"`).
+- A weekly Dependabot check for GitHub Actions.
+- INSTALL.md states the glibc floor of the release binary (2.34) and explains
+  the NVML header warnings a cgo build prints.
+
 ## [0.1.0] - 2026-08-30
 
 First release. gpu-bouncer arbitrates one GPU between local AI services that
@@ -105,8 +218,9 @@ do not cooperate with each other.
   acted on without an explicit `request` or `evict`. A service that is not
   named in the config is invisible to gpu-bouncer and is never touched, and
   the daemon re-checks that at the point of action. Every process level
-  action requires `allow_stop = true` on that service, checked both by the
-  scheduler and again inside the systemd adapter's `Stop`. Graceful release
+  action requires `allow_stop = true` on that service, checked by the
+  scheduler, again by the daemon at the point of action, and again inside
+  the systemd adapter's `Stop`. Graceful release
   through a service's own API needs no such permission, because it is the same
   request any client could make. The control socket is created with mode 0660
   and owned by the user running the daemon, so a user unit yields a socket
@@ -124,5 +238,6 @@ do not cooperate with each other.
   with a `.sha256` alongside it, and gated behind a GitHub environment that
   requires a human reviewer.
 
-[Unreleased]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hyprtuna/gpu-bouncer/releases/tag/v0.1.0
