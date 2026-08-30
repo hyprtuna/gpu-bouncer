@@ -69,14 +69,13 @@ jobs:
         run: go test -race ./...
 
       # The release job depends on this script; a tag whose CHANGELOG section
-      # is missing must fail here, on the PR, not at publish time.
+      # is missing must fail here, on the PR, not at publish time. The script
+      # has its own tests, and the real CHANGELOG's top section must extract.
       - name: release notes script
         run: |
-          .github/scripts/release-notes.sh "v$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | tr -d '#[] ')" CHANGELOG.md >/dev/null
-          if .github/scripts/release-notes.sh v0.0.0 CHANGELOG.md >/dev/null 2>&1; then
-            echo "release-notes.sh accepted a version the CHANGELOG does not have"
-            exit 1
-          fi
+          .github/scripts/release-notes_test.sh
+          top="$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?\]' CHANGELOG.md | sed -e 's/^## \[//' -e 's/\]$//')"
+          .github/scripts/release-notes.sh "v$top" CHANGELOG.md >/dev/null
 
       - name: no em or en dashes
         run: |
