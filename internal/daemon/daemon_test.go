@@ -693,6 +693,24 @@ func unloadsWithin(f *fakeOllamaServer, want int32, d time.Duration) bool {
 	return f.unloadHit.Load() >= want
 }
 
+// waitForCooldown blocks until the daemon has recorded a cooldown for the
+// service and returns when it ends. An action is finished, and its effect
+// measured, some time after the release reaches the fake.
+func waitForCooldown(t *testing.T, service string) time.Time {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, c := range call(t, ipc.Request{Op: ipc.OpStatus}).Cooldowns {
+			if c.Service == service {
+				return c.Until
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no cooldown was recorded for %s within 3s", service)
+	return time.Time{}
+}
+
 // flapSetup is a reactive daemon whose only eviction candidate reloads its
 // model the moment it is released, so every action measures a gain of zero.
 // The clock is injected and frozen, so the cooldown window is under the
@@ -816,6 +834,14 @@ func TestCooldownEndsExactlyOnTime(t *testing.T) {
 	flap, clock := flapSetup(t, true)
 	if !unloadsWithin(flap, 1, 3*time.Second) {
 		t.Fatal("the reactive loop never acted")
+	}
+	// The unload count rises when the release is sent, and the cooldown is
+	// recorded when the action finishes measuring its effect, a drain later.
+	// Advancing the clock in between would move the cooldown's own start,
+	// leaving it 60 seconds past where this test then looks for its end.
+	started := waitForCooldown(t, "flap")
+	if want := clock.now().Add(60 * time.Second); !started.Equal(want) {
+		t.Fatalf("cooldown until %s, want %s: it was recorded against a clock this test had already moved", started, want)
 	}
 
 	clock.advance(60*time.Second - time.Nanosecond)

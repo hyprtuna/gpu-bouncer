@@ -7,16 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [0.1.3] - 2026-08-30
 
-- `github.com/BurntSushi/toml` from 1.5.0 to 1.6.0, which accepts TOML 1.1
-  syntax that every earlier release refuses, such as a multi-line inline table
-  or a trailing comma in one. A config file written for this release may
-  therefore not load on 0.1.2 or older. README's Configuration section states
-  the level.
+The last planned fix round. An existing config file keeps loading, with two
+exceptions that were never working settings: a bare number on a duration key,
+which used to be replaced by the default, and a `drain_timeout` over `10m`.
 
 ### Fixed
 
+- **A client gave up after a fixed 90 seconds and blamed a missing daemon.**
+  `evict --all-except` over four services that would not drain exited 1 with
+  `no gpu-bouncer daemon is listening` while the daemon was still carrying out
+  the releases it had been asked for, and the operator was advised to start a
+  second one. A client's actions now run concurrently, one at a time per
+  service, so a plan costs its longest action rather than the sum of them; the
+  daemon sends the plan before carrying it out, and the client waits for the
+  largest `timeout` plus `drain_timeout` in that plan, plus ten seconds. A
+  failure on a socket that accepted the connection now reads `the daemon
+  accepted the request but did not answer within Ns` or `the daemon closed the
+  connection`, and no longer suggests starting a daemon. The control
+  connection's own cap follows the same bound instead of a flat two minutes.
+  A daemon or client of an earlier release still works in either direction.
+- **A bare number on a duration key skipped its range check and became the
+  default.** `poll_interval = 0`, `action_cooldown = 0`, `timeout = 0` and
+  `drain_timeout = 0`, and `-0`, loaded and were silently replaced, while
+  `"0s"` was refused: TOML hands an integer to a text unmarshaler as its
+  digits and `time.ParseDuration` accepts a unitless `"0"`. A non-string on a
+  duration key is now a hard error naming the key and the file. With that
+  closed, nothing a file sets can reach a default substitution, which is what
+  checking the raw value was written to guarantee.
+- **A dangling `device` symlink dropped the card and renumbered the next
+  one.** The virtual card test followed the symlink, so a link pointing
+  nowhere read as a card with no PCI vendor. A card counts as virtual only
+  when its `device` directory can be read and holds no `vendor`; a dangling
+  link, a target this process cannot reach, and an entry that is not a
+  directory all keep the card at its index, unreadable with the reason.
+- **The NVML failure did not lead on two of the four surfaces that carry
+  it.** `plan`'s note and the daemon's refusal to start put sixty characters
+  of device identification ahead of `nvml: init: ...`, which is the one line
+  saying what to fix. The reason leads everywhere now and the device follows
+  in brackets.
+- **The staleness warning compared the wrong thing.** The file path was part
+  of the digest and the client compared its own files against the daemon's, so
+  a client with a different `--config`, a different `XDG_CONFIG_HOME`, or no
+  config file at all was permanently told to restart the daemon to apply an
+  edit it had not made, and no restart could clear it. The documented setup of
+  a system daemon plus a per user client overlay hit this on every `status`.
+  The daemon now reports the paths it loaded and a digest over their contents
+  only, and the client re-reads those same paths. A file the daemon loaded
+  that cannot be read now leaves `config_stale` null and says so, and a daemon
+  that loaded no file says `the daemon loaded no config file` rather than
+  naming an empty path.
+- **INSTALL.md shipped pinned to the previous release.** At the v0.1.2 tag the
+  download block still said `version=v0.1.1`, so a reader who copied it
+  downloaded and successfully verified the wrong release. Every version string
+  is bumped, and the gate now refuses an INSTALL.md naming any release but the
+  one at the top of this file, so it cannot recur silently.
+- **A field the daemon did not send was reported as false.** A client against
+  an older daemon started with `--dry-run` printed `A daemon is running.` and
+  `daemon_dry_run: false` while that daemon was planning and never acting.
+  `daemon_dry_run` is null when it was not reported, and `status` says the
+  daemon is older than the client and does not say.
 - **A GPU reading that failed was reported as zero.** The read taken either
   side of an action discarded its error, so a failure logged
   `free_after_mib=0`, a figure nobody measured, and fed the difference from
@@ -28,13 +79,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Every request to a local service logged `duration=0s`.** The figure was
   rounded to the millisecond, and a call to a service on the same machine
   takes less than that. It is measured to the microsecond now.
-- **A systemd `unit` was never validated.** toml 1.6.0 also decodes `\e`, so a
+- **A systemd `unit` was never validated.** toml 1.6.0 decodes `\e`, so a
   config file could put an escape character into a unit name, where it reached
-  a `systemctl` argument and every error message about the service invisibly. A
-  unit must now be a systemd unit name: a known type suffix, systemd's own
+  a `systemctl` argument and every error message about the service invisibly.
+  A unit must now be a systemd unit name: a known type suffix, systemd's own
   character set before it, a letter or digit first so it can never be read as
   an option, and within systemd's 255 byte limit. A refusal shows any control
   character escaped rather than printing it.
+- **`services[].items` was absent when empty**, though 0.1.2 promised every
+  list present as `[]`. Nested lists now carry that guarantee too, and
+  INSTALL names the nested strings that can be absent instead of implying
+  they cannot.
+- **`message` was documented as appearing only on a dry run.** A plain second
+  `request` for a service that already holds a claim carries it as well.
+- **The release notes extractor mishandled five inputs.** A `## [` heading or
+  a `[x]: url` link definition inside a fenced code block truncated the body
+  at the fence; a CRLF changelog put a carriage return at the end of every
+  published line and defeated the emptiness check; a section of only spaces or
+  tabs was published as spaces or tabs; and a note quoting its own heading in
+  prose was counted as a second section, which blocked a legitimate release.
+  Fences are tracked, carriage returns are stripped first, headings are
+  counted anchored, and a body with no non-whitespace character is empty.
+
+### Changed
+
+- `github.com/BurntSushi/toml` from 1.5.0 to 1.6.0, which accepts TOML 1.1
+  syntax that every earlier release refuses, such as a multi-line inline table
+  or a trailing comma in one. A config file written for this release may
+  therefore not load on 0.1.2 or older. README's Configuration section states
+  the level.
+- `drain_timeout` gains an upper bound of `10m`. A drain is a client and a
+  control connection both waiting on a service that has already been told to
+  let go; past ten minutes it is not draining, it is stuck.
+- A plan's actions run concurrently, one at a time per service. `evict
+  --all-except` over four stuck services costs one drain rather than four.
+
+### Added
+
+- `free_after_mib` on a `request` and an `evict` reply: the GPU's free VRAM
+  read once after every action has finished, which is what `target_met` and
+  the `freed X MiB of the Y MiB asked for` line are measured against. The per
+  action figures describe overlapping windows now that actions run together.
+- `paths` on `daemon_config`, the list of files the daemon loaded, so a client
+  can re-read exactly those files rather than split a joined string.
+- `install-version.sh`, with its own tests, run by the gate: every `vX.Y.Z` in
+  INSTALL.md must be the version at the top of this file.
 
 ## [0.1.2] - 2026-08-30
 
@@ -354,7 +443,8 @@ do not cooperate with each other.
   with a `.sha256` alongside it, and gated behind a GitHub environment that
   requires a human reviewer.
 
-[Unreleased]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/hyprtuna/gpu-bouncer/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hyprtuna/gpu-bouncer/releases/tag/v0.1.0
