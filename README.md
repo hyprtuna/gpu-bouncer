@@ -197,6 +197,7 @@ change what the daemon is willing to do.
 | `priority` | `0` | Higher wins. Equal priority never evicts. |
 | `allow_stop` | `false` | Required before any process level action. |
 | `timeout` | `"5s"` | Bounds every request to this service. |
+| `drain_timeout` | `"30s"` | How long a release waits for the service to confirm the unload. Only `ollama` waits; a release still loaded when it expires is a failed action. |
 
 See [packaging/config.example.toml](packaging/config.example.toml) for a
 commented version.
@@ -228,7 +229,7 @@ in the code. Each has real limits, listed here rather than discovered later.
 | Adapter | Release mechanism | Limits |
 |---|---|---|
 | `ollama` | A generate call with `keep_alive` 0 and no prompt, per loaded model | Ollama has no unload endpoint. A 200 only schedules expiry, so the adapter waits for the model to leave `/api/ps`, and even that is not proof the VRAM is back. Ollama cannot report whether it is busy. |
-| `comfyui` | `POST /api/free` with `unload_models` and `free_memory` | ComfyUI accepts this while a job is running, answers 200, and does nothing until the job ends. The adapter checks the queue first and declines instead. It reports no per model inventory, so held VRAM is derived from torch's allocator and marked estimated. |
+| `comfyui` | `POST /api/free` with `unload_models` and `free_memory` | ComfyUI accepts this while a job is running, answers 200, and does nothing until the job ends. The adapter checks the queue first and declines instead. It reports no per model inventory, so held VRAM is derived from torch's allocator for the arbitrated device and marked estimated. v0.1 assumes the torch device ordinal equals the NVML index, which holds unless `CUDA_VISIBLE_DEVICES` reorders devices for ComfyUI. |
 | `llama-swap` | `POST /api/models/unload` | Synchronous, unlike Ollama. Reports no VRAM figure at all, so held memory is an honest zero marked estimated. Set `GPU_BOUNCER_LLAMA_SWAP_API_KEY` if your instance requires a key. |
 | `systemd-unit` | none | Can only stop, never release, and only with `allow_stop = true`. A unit says nothing about VRAM. |
 

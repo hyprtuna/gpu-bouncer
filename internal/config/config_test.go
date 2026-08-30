@@ -193,6 +193,13 @@ func TestValidateRejects(t *testing.T) {
 			body:    "[policy]\npoll_interval = \"soon\"\n",
 			wantErr: "invalid duration",
 		},
+		{
+			// A password in the URL would be sent as Basic auth and echoed in
+			// every error string. The message points at the supported way.
+			name:    "endpoint with userinfo",
+			body:    "[[service]]\nname = \"x\"\nadapter = \"llama-swap\"\nendpoint = \"http://u:p@127.0.0.1:9292\"\n",
+			wantErr: "GPU_BOUNCER_LLAMA_SWAP_API_KEY",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -219,6 +226,9 @@ func TestValidateFillsDefaults(t *testing.T) {
 	svc := cfg.Services[0]
 	if got, want := svc.Timeout.D(), DefaultServiceTimeout; got != want {
 		t.Errorf("timeout = %s, want %s", got, want)
+	}
+	if got, want := svc.DrainTimeout.D(), DefaultDrainTimeout; got != want {
+		t.Errorf("drain_timeout = %s, want %s", got, want)
 	}
 	if got, want := svc.Endpoint, "http://127.0.0.1:11434"; got != want {
 		t.Errorf("endpoint = %q, want %q (trailing slash trimmed)", got, want)

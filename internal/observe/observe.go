@@ -31,7 +31,7 @@ type Observer struct {
 func New(cfg config.Config, source gpu.Source) (*Observer, error) {
 	adapters := make(map[string]adapter.Adapter, len(cfg.Services))
 	for _, svc := range cfg.Services {
-		a, err := adapter.New(svc)
+		a, err := adapter.New(svc, cfg.Policy.GPUIndex)
 		if err != nil {
 			return nil, err
 		}

@@ -48,20 +48,20 @@ type comfyUIAdapter struct {
 	client  *http.Client
 
 	// gpuIndex is the torch device ordinal whose memory is attributed to this
-	// service. v0.1 arbitrates a single GPU, and config.Service carries no per
-	// service index, so it is fixed at 0 here rather than plumbed through the
-	// config. It is a field and not a constant so that the multi GPU work has
-	// one place to change.
+	// service. It is policy.gpu_index: v0.1 assumes the torch device ordinal
+	// ComfyUI reports equals the NVML index gpu-bouncer arbitrates, which
+	// holds on a single NVIDIA card and on a multi card machine where
+	// CUDA_VISIBLE_DEVICES has not reordered the devices for ComfyUI.
 	gpuIndex int
 }
 
-func newComfyUI(svc config.Service) *comfyUIAdapter {
+func newComfyUI(svc config.Service, gpuIndex int) *comfyUIAdapter {
 	return &comfyUIAdapter{
 		name:     svc.Name,
 		base:     svc.Endpoint,
 		timeout:  svc.Timeout.D(),
 		client:   newHTTPClient(),
-		gpuIndex: 0,
+		gpuIndex: gpuIndex,
 	}
 }
 

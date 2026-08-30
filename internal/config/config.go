@@ -99,6 +99,9 @@ type Service struct {
 	AllowStop bool `toml:"allow_stop"`
 	// Timeout bounds every request made to this service.
 	Timeout Duration `toml:"timeout"`
+	// DrainTimeout bounds how long a release waits for the service to
+	// confirm that what it released is gone. Only the ollama adapter waits.
+	DrainTimeout Duration `toml:"drain_timeout"`
 }
 
 // Policy holds the daemon-wide arbitration settings.
@@ -144,6 +147,10 @@ func Defaults() Config {
 
 // DefaultServiceTimeout bounds a service request when the config does not.
 const DefaultServiceTimeout = 5 * time.Second
+
+// DefaultDrainTimeout bounds a release's wait for the service to confirm the
+// unload when the config does not.
+const DefaultDrainTimeout = 30 * time.Second
 
 const (
 	systemPath  = "/etc/gpu-bouncer/config.toml"
@@ -345,6 +352,9 @@ func mergeService(dst *Service, src Service, keys map[string]struct{}) {
 	if set("timeout") {
 		dst.Timeout = src.Timeout
 	}
+	if set("drain_timeout") {
+		dst.DrainTimeout = src.DrainTimeout
+	}
 }
 
 func indexOfService(services []Service, name string) int {
@@ -386,6 +396,9 @@ func Validate(cfg *Config) error {
 		}
 		if svc.Timeout <= 0 {
 			svc.Timeout = Duration(DefaultServiceTimeout)
+		}
+		if svc.DrainTimeout <= 0 {
+			svc.DrainTimeout = Duration(DefaultDrainTimeout)
 		}
 
 		if svc.Adapter.needsEndpoint() {
@@ -429,6 +442,12 @@ func validateEndpoint(endpoint string) error {
 	}
 	if u.Host == "" {
 		return fmt.Errorf("endpoint %q has no host", endpoint)
+	}
+	if u.User != nil {
+		// A password here would be sent as Basic auth and would surface in
+		// every error string. No adapter authenticates through the URL.
+		return fmt.Errorf("endpoint %q carries a username or password, which gpu-bouncer never sends; for a llama-swap API key set GPU_BOUNCER_LLAMA_SWAP_API_KEY in the daemon's environment",
+			u.Redacted())
 	}
 	return nil
 }

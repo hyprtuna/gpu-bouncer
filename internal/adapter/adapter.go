@@ -99,13 +99,15 @@ type Adapter interface {
 	Stop(ctx context.Context) (Result, error)
 }
 
-// New builds the adapter for a validated service config.
-func New(svc config.Service) (Adapter, error) {
+// New builds the adapter for a validated service config. gpuIndex is the
+// arbitrated device from policy.gpu_index, for adapters that attribute memory
+// per device.
+func New(svc config.Service, gpuIndex int) (Adapter, error) {
 	switch svc.Adapter {
 	case config.AdapterOllama:
 		return newOllama(svc), nil
 	case config.AdapterComfyUI:
-		return newComfyUI(svc), nil
+		return newComfyUI(svc, gpuIndex), nil
 	case config.AdapterLlamaSwap:
 		return newLlamaSwap(svc), nil
 	case config.AdapterSystemdUnit:

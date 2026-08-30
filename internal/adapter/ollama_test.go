@@ -304,21 +304,54 @@ func TestOllamaReleaseRejectsWrongDoneReason(t *testing.T) {
 	}
 }
 
-// When a model will not drain, the adapter must say so rather than claim the
-// VRAM is back.
+// When a model will not drain, the release is a failed action: the unload
+// was accepted, but the VRAM is not back, and Acted must not say otherwise.
 func TestOllamaReleaseReportsUndrainedModels(t *testing.T) {
 	fake := &fakeOllama{psBodies: []string{psTwoModels}} // never empties
 	srv := fake.start(t)
 
 	result, err := newTestOllama(srv.URL, 2*time.Second).Release(context.Background())
-	if err != nil {
-		t.Fatalf("Release: %v", err)
+	if err == nil {
+		t.Fatal("Release returned no error for models that never drained")
 	}
-	if !result.Acted {
-		t.Error("Acted = false, want true: the unload requests were accepted")
+	if !strings.Contains(err.Error(), "still loaded after 200ms") {
+		t.Errorf("error = %q, want it to say the models were still loaded after the drain timeout", err)
 	}
-	if !strings.Contains(result.Detail, "still listed") {
-		t.Errorf("Detail = %q, want it to admit the models were still listed", result.Detail)
+	if result.Acted {
+		t.Error("Acted = true, want false: the memory did not come back")
+	}
+	if len(result.Targets) != 2 {
+		t.Errorf("Targets = %v, want both models named, the unloads were accepted", result.Targets)
+	}
+}
+
+// drain_timeout from the config bounds the wait, so a never clearing /api/ps
+// cannot block an evict for the old hardcoded 30 seconds.
+func TestOllamaDrainTimeoutFromConfig(t *testing.T) {
+	fake := &fakeOllama{psBodies: []string{psTwoModels}} // never empties
+	srv := fake.start(t)
+	a := newOllama(config.Service{
+		Name:         "ollama",
+		Adapter:      config.AdapterOllama,
+		Endpoint:     srv.URL,
+		Timeout:      config.Duration(2 * time.Second),
+		DrainTimeout: config.Duration(time.Second),
+	})
+	if a.drainTimeout != time.Second {
+		t.Fatalf("drainTimeout = %s, want the configured 1s", a.drainTimeout)
+	}
+
+	start := time.Now()
+	result, err := a.Release(context.Background())
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "still loaded after 1s") {
+		t.Fatalf("Release error = %v, want a still loaded after 1s failure", err)
+	}
+	if result.Acted {
+		t.Error("Acted = true, want false")
+	}
+	if elapsed >= 2*time.Second {
+		t.Errorf("Release took %s, want under 2s with drain_timeout = 1s", elapsed)
 	}
 }
 
