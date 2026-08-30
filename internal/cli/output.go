@@ -59,6 +59,18 @@ type releaseOutput struct {
 	Message string `json:"message"`
 }
 
+// servicesOut carries the nested lists through the same guarantee as the top
+// level ones: a list is present and empty as [], never absent and never null.
+// A consumer reading services[].items should not have to handle three shapes
+// where there are two.
+func servicesOut(services []ipc.ServiceReport) []ipc.ServiceReport {
+	out := orEmpty(services)
+	for i := range out {
+		out[i].Items = orEmpty(out[i].Items)
+	}
+	return out
+}
+
 func orEmpty[T any](s []T) []T {
 	if s == nil {
 		return []T{}
@@ -83,7 +95,7 @@ func statusOutputOf(r ipc.Response) statusOutput {
 		OK:           r.OK,
 		GPU:          r.GPU,
 		Devices:      orEmpty(r.Devices),
-		Services:     orEmpty(r.Services),
+		Services:     servicesOut(r.Services),
 		Claims:       orEmpty(r.Claims),
 		Cooldowns:    orEmpty(r.Cooldowns),
 		DaemonConfig: r.DaemonConfig,

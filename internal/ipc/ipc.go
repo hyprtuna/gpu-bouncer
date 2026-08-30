@@ -107,12 +107,15 @@ func GPUReportOf(dev gpu.Device, source string) GPUReport {
 
 // ServiceReport is one service as the daemon last saw it.
 type ServiceReport struct {
-	Name          string   `json:"name"`
-	Adapter       string   `json:"adapter"`
-	Priority      int      `json:"priority"`
-	Up            bool     `json:"up"`
-	Version       string   `json:"version,omitempty"`
-	Items         []string `json:"items,omitempty"`
+	Name     string `json:"name"`
+	Adapter  string `json:"adapter"`
+	Priority int    `json:"priority"`
+	Up       bool   `json:"up"`
+	Version  string `json:"version,omitempty"`
+	// Items has no omitempty: a list is a list at every level, and status
+	// shapes it to [] rather than leaving a consumer to handle absent, null
+	// and empty as three different things.
+	Items         []string `json:"items"`
 	HeldMiB       uint64   `json:"held_mib"`
 	HeldEstimated bool     `json:"held_estimated"`
 	Idle          bool     `json:"idle"`

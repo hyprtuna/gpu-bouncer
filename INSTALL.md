@@ -37,12 +37,12 @@ A binary installed this way reports the module version Go recorded in it:
 
 ```
 $ gpu-bouncer version
-gpu-bouncer v0.1.1
+gpu-bouncer v0.1.2
 ```
 
 `gpu-bouncer --version` prints the same line. A plain `go build` in a git
 checkout reports what Go records for it, the nearest tag or a pseudo-version
-such as `v0.1.1-0.20260830102548-6beb4269d63d+dirty`; a build from a tree
+such as `v0.1.2-0.20260830102548-6beb4269d63d+dirty`; a build from a tree
 with no git history reports `gpu-bouncer dev`. The `-ldflags` line under
 [Build from source](#build-from-source) stamps an exact version either way.
 
@@ -53,7 +53,7 @@ carries two files: a `.tar.gz` holding the single `gpu-bouncer` binary, and a
 `.sha256` file for it.
 
 ```sh
-version=v0.1.1
+version=v0.1.2
 base=gpu-bouncer_${version}_linux_amd64.tar.gz
 
 curl -LO "https://github.com/hyprtuna/gpu-bouncer/releases/download/${version}/${base}"
@@ -69,7 +69,7 @@ downloaded:
 sha256sum -c "${base}.sha256"
 ```
 
-That prints `gpu-bouncer_v0.1.1_linux_amd64.tar.gz: OK` and exits 0. Anything
+That prints `gpu-bouncer_v0.1.2_linux_amd64.tar.gz: OK` and exits 0. Anything
 else means the download does not match what was published: stop, and do not
 unpack it.
 
@@ -99,7 +99,7 @@ To stamp a version number, set the same variable the release workflow sets:
 
 ```sh
 go build -trimpath \
-  -ldflags "-X github.com/hyprtuna/gpu-bouncer/internal/cli.Version=v0.1.1" \
+  -ldflags "-X github.com/hyprtuna/gpu-bouncer/internal/cli.Version=v0.1.2" \
   -o gpu-bouncer ./cmd/gpu-bouncer
 ```
 
@@ -313,7 +313,7 @@ gpu-bouncer version
 ```
 
 ```
-gpu-bouncer v0.1.1
+gpu-bouncer v0.1.2
 ```
 
 ```sh
@@ -384,6 +384,12 @@ an unknown one.
 | `gpu` | object | the arbitrated device: `known`, `index`, `name`, `bus_id`, `vendor`, `source`, `total_mib`, `used_mib`, `free_mib`, `error`. `index` is the configured `gpu_index` even when no device is behind it; `error` says why `known` is false |
 | `devices` | list of the same object | every device the source sees |
 | `services` | list | per service: `name`, `adapter`, `priority`, `up`, `version`, `items`, `held_mib`, `held_estimated`, `idle`, `idle_known`, `allow_stop`, `error` |
+
+Lists are present at every level, empty as `[]`, `services[].items` included.
+Nested **strings** are the exception: `version` and `error` on a service, and
+`name`, `bus_id`, `vendor`, `source` and `error` on `gpu` and on `devices[]`,
+are absent when they have no value. Read them as empty rather than expecting
+the key.
 | `claims` | list | outstanding claims: `service`, `need_mib`, `at`; empty without a daemon |
 | `cooldowns` | list | services the daemon's loop is leaving alone: `service`, `until`, `reason`; empty without a daemon |
 | `daemon_running` | bool | whether a daemon answered |
@@ -398,8 +404,9 @@ an unknown one.
 strings).
 
 `request` and `evict`: `ok`, `error` (only when an executed action failed:
-`N of M actions failed`), `message` (only on a dry run or a dry-run daemon),
-`plan` as above, `executed` (list of `service`, `verb`, `reason`, `acted`,
+`N of M actions failed`), `message` (a dry run, a dry-run daemon, or a second
+`request` for a service that already holds a claim, which reads `updated the
+claim held since <time>`), `plan` as above, `executed` (list of `service`, `verb`, `reason`, `acted`,
 `detail`, `error`, `free_before_mib`, `free_after_mib`), `free_after_mib`
 (the GPU's free VRAM read once after every action had finished, or `null`
 when nothing ran or the reading failed), and on `request` only `target_met`
