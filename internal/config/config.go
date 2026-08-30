@@ -366,6 +366,15 @@ func writeDigest(digest hash.Hash, data []byte) {
 	digest.Write([]byte{0})
 }
 
+// DigestRecipe names how Hash and ContentDigest are computed, so that a
+// daemon can say which recipe produced the digest it reports and a client can
+// decline to compare one it cannot reproduce. Releases up to 0.1.2 hashed the
+// file paths in along with the contents and named no recipe at all, so their
+// digest and this one never matched and every mixed-version pair reported a
+// config nobody had edited as stale. Change this string whenever the bytes
+// fed to the hash change.
+const DigestRecipe = "content-v1"
+
 // ContentDigest hashes the bytes of the named files, in order, exactly as
 // Load hashes the files it reads. A client compares the digest a daemon
 // reports against this over the daemon's own paths, which answers the only

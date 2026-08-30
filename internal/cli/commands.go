@@ -299,6 +299,13 @@ func configDrift(report ipc.ConfigReport) (*bool, string) {
 		fresh := false
 		return &fresh, "the daemon loaded no config file"
 	}
+	if report.DigestRecipe != config.DigestRecipe {
+		// A digest computed some other way is not comparable, and a
+		// mismatch between two recipes says nothing about the files. This
+		// is what made an upgraded client report a daemon it had not yet
+		// restarted as stale on every status, about a file nobody edited.
+		return nil, recipeNote(report.DigestRecipe)
+	}
 	joined := strings.Join(paths, ", ")
 	now, err := config.ContentDigest(paths)
 	if err != nil {
@@ -311,6 +318,19 @@ func configDrift(report ipc.ConfigReport) (*bool, string) {
 	}
 	return &stale, fmt.Sprintf("the daemon loaded a different config (%s, loaded %s); restart it to apply your edit",
 		joined, report.LoadedAt.Format(time.RFC3339))
+}
+
+// recipeNote says why a digest was not compared. A daemon that names no
+// recipe is older than the field; one that names another computes its digest
+// in a way this client does not implement. Either way the answer is that it
+// cannot be told, which is not the same as "no".
+func recipeNote(recipe string) string {
+	const tail = "so whether it is running on an older edit cannot be told"
+	if recipe == "" {
+		return "the daemon is older than this client and does not say how it computed the digest of " +
+			"the config it loaded, " + tail
+	}
+	return fmt.Sprintf("the daemon computed that digest as %q, which this client does not implement, %s", recipe, tail)
 }
 
 // runPlan shows what would happen now. It asks the daemon when one is running,
