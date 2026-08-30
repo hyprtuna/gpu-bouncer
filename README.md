@@ -203,7 +203,9 @@ error rather than being ignored, because a misspelled policy key would silently
 change what the daemon is willing to do. So is a number outside its range: a
 negative `vram_floor_mib`, `min_effect_mib` or `gpu_index`, a duration of zero
 or less, a `poll_interval` under `1s`, or a `drain_timeout` over `10m`. Only
-`priority` may be negative.
+`priority` may be negative, and it has no range beyond what an integer holds.
+Duration keys take a quoted duration string such as `"5s"`; a bare number on
+one is a wrong type, not a zero.
 
 ### `[policy]`
 
