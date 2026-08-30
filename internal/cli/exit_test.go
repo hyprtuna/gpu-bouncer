@@ -199,7 +199,7 @@ func TestExitCodesAndFirstLines(t *testing.T) {
 			name:       "version prints the version",
 			args:       []string{"version"},
 			wantCode:   0,
-			wantStdout: "gpu-bouncer " + Version,
+			wantStdout: "gpu-bouncer " + version(),
 		},
 		{
 			name:       "--json version is JSON",
@@ -333,8 +333,8 @@ func TestJSONVersion(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
 	}
-	if decoded["version"] != Version {
-		t.Errorf("version = %q, want %q", decoded["version"], Version)
+	if decoded["version"] != version() {
+		t.Errorf("version = %q, want %q", decoded["version"], version())
 	}
 }
 
