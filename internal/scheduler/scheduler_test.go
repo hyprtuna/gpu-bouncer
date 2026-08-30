@@ -347,6 +347,17 @@ func TestDecideGolden(t *testing.T) {
 			wantNote:    "comfyui left alone, cooling down until 2026-08-30T12:01:00Z",
 		},
 		{
+			name: "a service with an action in flight is passed over with a note",
+			cfg:  cfg(true, 2048, "", map[string]int{"ollama": 50, "comfyui": 20}),
+			obs: obs(7188,
+				releasable("ollama", 50, 200),
+				ServiceState{Name: "comfyui", Priority: 20, Up: true, HeldMiB: 6988, CanRelease: true, ActionInFlight: true}),
+			wantSteps:   nil,
+			wantTrigger: TriggerReactive,
+			wantBenefit: "ollama",
+			wantNote:    "comfyui left alone, an action on it is still in flight",
+		},
+		{
 			name: "a service holding nothing is not evicted, and says so",
 			cfg:  cfg(true, 2048, "", map[string]int{"ollama": 50, "comfyui": 20, "idle": 5}),
 			obs: obs(7188,
@@ -515,6 +526,14 @@ func TestEvict(t *testing.T) {
 		}
 		if plan.Trigger != TriggerEvict {
 			t.Errorf("trigger = %q, want %q", plan.Trigger, TriggerEvict)
+		}
+	})
+
+	t.Run("an action in flight is not doubled", func(t *testing.T) {
+		busy := obs(7000, ServiceState{Name: "ollama", Priority: 50, Up: true, HeldMiB: 3000, CanRelease: true, ActionInFlight: true})
+		plan := Evict(busy, []string{"ollama"})
+		if !plan.Empty() || !hasNote(plan, "ollama skipped, an action on it is still in flight") {
+			t.Errorf("plan = %+v, want no action and the in flight note", plan)
 		}
 	})
 

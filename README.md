@@ -243,7 +243,11 @@ probe failed, or a service is busy in a way that would make the release a no-op.
 After an action that measurably freed nothing, the daemon's own loop leaves
 that service alone for `action_cooldown`, so a service that reloads the moment
 it is released is not released once per poll forever; an explicit `request` or
-`evict` still acts. Every empty plan says why, one note per service passed over.
+`evict` still acts. The loop never waits for an action: each one runs on its
+own, at most one per service at a time, so an Ollama drain on one service
+does not stop the next poll from observing and acting on the others, and a
+plan passes over a service whose action is still in flight. Every empty plan
+says why, one note per service passed over.
 
 ## Adapters
 
