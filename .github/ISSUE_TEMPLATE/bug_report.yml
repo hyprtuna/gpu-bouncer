@@ -1,0 +1,60 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The exact commands you ran.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `gpu-bouncer status`
+      description: >
+        This is read only and safe to run. Redact anything you would rather
+        not share.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: plan
+    attributes:
+      label: Output of `gpu-bouncer plan`
+      description: >
+        Also read only. If the problem is that gpu-bouncer did or did not act,
+        this is usually the most useful thing in the report.
+      render: shell
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Your config file
+      render: toml
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `gpu-bouncer version`.
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      placeholder: RTX 4070 Laptop, driver 580.x
