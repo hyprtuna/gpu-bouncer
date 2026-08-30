@@ -230,10 +230,20 @@ type Listener struct {
 	listener net.Listener
 }
 
+// maxSocketPath is the usable length of a Unix socket path. The kernel's
+// sockaddr_un holds 108 bytes including the terminator, and a path over that
+// fails with a bare "invalid argument" that says nothing about the cause.
+const maxSocketPath = 107
+
 // Listen binds the socket, replacing a stale one left by a crashed daemon.
 // A socket that something is still listening on is never removed: that would
 // silently steal control from a running daemon.
 func Listen(path string) (*Listener, error) {
+	if len(path) > maxSocketPath {
+		return nil, fmt.Errorf(
+			"socket path is %d bytes, which is over the %d byte limit for a Unix socket: %s",
+			len(path), maxSocketPath, path)
+	}
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("create socket directory %s: %w", dir, err)

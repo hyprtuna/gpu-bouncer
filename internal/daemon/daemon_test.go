@@ -452,3 +452,18 @@ func TestResponseRoundTripsAsJSON(t *testing.T) {
 }
 
 func createFile(path string) (*os.File, error) { return os.Create(path) }
+
+// A Unix socket path over the kernel limit fails with a bare "invalid
+// argument" that names nothing. Catching it here means the operator is told
+// which path was too long and by how much.
+func TestListenRejectsAnOverlongPath(t *testing.T) {
+	dir := t.TempDir()
+	long := filepath.Join(dir, strings.Repeat("d", 120)+".sock")
+	_, err := ipc.Listen(long)
+	if err == nil {
+		t.Fatal("Listen accepted a path over the Unix socket limit")
+	}
+	if !strings.Contains(err.Error(), "over the") || !strings.Contains(err.Error(), "byte limit") {
+		t.Errorf("error = %q, want it to explain the length limit", err)
+	}
+}
