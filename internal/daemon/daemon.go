@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -384,11 +385,34 @@ func (d *Daemon) longestAction(plan scheduler.Plan) time.Duration {
 		if !ok {
 			continue
 		}
-		if bound := svc.Timeout.D() + svc.DrainTimeout.D(); bound > longest {
+		if bound := actionBound(svc); bound > longest {
 			longest = bound
 		}
 	}
 	return longest
+}
+
+// maxActionBound caps what one action may be said to take, so that every
+// deadline derived from it can be added to without wrapping: the client's
+// wait for the plan, and the daemon's budget for the control connection.
+// A config file cannot come near it, because timeout is bounded at an hour
+// and drain_timeout at ten minutes. A Config built in code can, and a bound
+// that wrapped into a negative duration made the longest action in a plan
+// look like no action at all, which put the client back on its fixed wait.
+const maxActionBound = time.Duration(math.MaxInt64 / 4)
+
+// actionBound is how long one action on svc may take: its request timeout
+// plus the drain it may then wait out, saturating rather than overflowing.
+func actionBound(svc config.Service) time.Duration {
+	timeout, drain := svc.Timeout.D(), svc.DrainTimeout.D()
+	if timeout > maxActionBound || drain > maxActionBound {
+		return maxActionBound
+	}
+	// Both are at most maxActionBound now, so the sum cannot wrap.
+	if bound := timeout + drain; bound < maxActionBound {
+		return bound
+	}
+	return maxActionBound
 }
 
 // connBudget bounds one control connection: the longest plan this config can
@@ -399,7 +423,7 @@ func (d *Daemon) longestAction(plan scheduler.Plan) time.Duration {
 func (d *Daemon) connBudget() time.Duration {
 	var longest time.Duration
 	for _, svc := range d.cfg.Services {
-		if bound := svc.Timeout.D() + svc.DrainTimeout.D(); bound > longest {
+		if bound := actionBound(svc); bound > longest {
 			longest = bound
 		}
 	}
@@ -570,9 +594,16 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request, send func(ipc.Resp
 // reloads, so a client comparing it with the files on disk can tell whether
 // an edit has taken effect.
 func (d *Daemon) configReport() *ipc.ConfigReport {
+	paths := d.cfg.Sources
+	if paths == nil {
+		// A list on the wire is present and empty, never absent: a daemon
+		// running on built in defaults loaded no file, which is an empty
+		// list and not an unanswered question.
+		paths = []string{}
+	}
 	return &ipc.ConfigReport{
 		Path:         strings.Join(d.cfg.Sources, ", "),
-		Paths:        d.cfg.Sources,
+		Paths:        paths,
 		SHA256:       d.cfg.Hash,
 		DigestRecipe: config.DigestRecipe,
 		LoadedAt:     d.cfg.LoadedAt,

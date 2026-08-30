@@ -218,9 +218,42 @@ func TestDrainTimeoutHasAnUpperBound(t *testing.T) {
 	}
 	// No other key gains an upper bound by accident.
 	for _, b := range NumericBounds {
-		if b.Max != 0 && b.Key != "drain_timeout" {
+		if b.Max != 0 && b.Key != "drain_timeout" && b.Key != "timeout" {
 			t.Errorf("%s.%s has an upper bound of %d, which is undocumented", b.Table, b.Key, b.Max)
 		}
+	}
+}
+
+// timeout is bounded too. Without an upper bound the binary accepted a
+// timeout so large that timeout plus drain_timeout overflowed an int64, and
+// the plan bound built from that sum wrapped negative: the daemon then
+// announced no bound at all and the client fell back to its fixed 90 second
+// wait, which is the opposite of what a long timeout asks for.
+func TestTimeoutHasAnUpperBound(t *testing.T) {
+	head := "[[service]]\nname = \"x\"\nadapter = \"ollama\"\nendpoint = \"http://h:1\"\ntimeout = "
+	t.Run("at the maximum", func(t *testing.T) {
+		cfg, err := LoadFrom([]string{writeFile(t, t.TempDir(), "c.toml", head+`"1h"`+"\n")})
+		if err != nil {
+			t.Fatalf("1h rejected: %v", err)
+		}
+		if got := cfg.Services[0].Timeout.D(); got != MaxServiceTimeout {
+			t.Errorf("timeout = %s, want %s", got, MaxServiceTimeout)
+		}
+	})
+	// The last value is the one the binary used to accept, at which the sum
+	// with drain_timeout overflows.
+	for _, value := range []string{`"1h0m1s"`, `"2h"`, `"24h"`, `"2562047h47m16s"`} {
+		t.Run(value, func(t *testing.T) {
+			_, err := LoadFrom([]string{writeFile(t, t.TempDir(), "c.toml", head+value+"\n")})
+			if err == nil {
+				t.Fatalf("timeout = %s accepted, want a refusal", value)
+			}
+			for _, want := range []string{`service "x": timeout must be at most 1h0m0s`, "c.toml"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", err, want)
+				}
+			}
+		})
 	}
 }
 

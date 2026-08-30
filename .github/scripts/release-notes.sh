@@ -27,6 +27,20 @@ fi
 # return is not an empty line.
 body=$(tr -d '\r' < "$changelog")
 
+# A fence that is never closed makes every line after it content, so the
+# section would run past its own end and be published carrying the next
+# release's notes. There is no safe guess about where the author meant it to
+# close, so the release is refused instead. Fences are recognised wherever
+# they are indented to: a heading inside an indented block is an example, and
+# reading it as the end of the section silently truncated the notes.
+if printf '%s\n' "$body" | awk '
+  /^[[:blank:]]*(```|~~~)/ { fence = !fence }
+  END { exit fence ? 0 : 1 }
+'; then
+  echo "release-notes: $changelog has a code fence that is never closed" >&2
+  exit 1
+fi
+
 # A released heading is "## [<semver>]", where semver may carry a pre-release
 # or build suffix. "## [Unreleased]" is not one.
 heading='^## \[[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?\]'
@@ -45,7 +59,7 @@ fi
 # release note that quotes its own heading in prose look like a second copy
 # of the section, which blocked a legitimate release.
 count=$(printf '%s\n' "$body" | awk -v v="$version" '
-  /^(```|~~~)/ { fence = !fence; next }
+  /^[[:blank:]]*(```|~~~)/ { fence = !fence; next }
   !fence && index($0, "## [" v "]") == 1 { n++ }
   END { print n + 0 }
 ')
@@ -59,7 +73,7 @@ fi
 # is content: a "## [" or a "[x]: url" line inside one is an example, not the
 # end of the section, and treating it as the end silently truncated the notes.
 notes=$(printf '%s\n' "$body" | awk -v v="$version" '
-  /^(```|~~~)/ { fence = !fence; if (on) print; next }
+  /^[[:blank:]]*(```|~~~)/ { fence = !fence; if (on) print; next }
   !fence && on && (/^## \[/ || /^\[[^]]+\]: /) { exit }
   !fence && index($0, "## [" v "]") == 1 { on = 1; next }
   on { print }
