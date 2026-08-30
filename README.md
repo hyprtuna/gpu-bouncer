@@ -167,8 +167,11 @@ troubleshooting.
 | `gpu-bouncer evict <service>` | Free one service now | yes |
 | `gpu-bouncer evict --all-except <service>` | Free everything else | yes |
 
-`--dry-run` works on everything and is the honest preview: the daemon builds
-the same plan it would have executed, reports it, and does nothing.
+`--dry-run`, `--json` and `--verbose` are accepted before or after any command
+name. `--dry-run` is the honest preview: the daemon builds the same plan it
+would have executed, reports it, and does nothing. `request`, `release` and
+`evict` exit 1 when any action they executed failed, and with `--json` every
+response, errors included, is one JSON object on stdout.
 
 A claim made with `request` stands until you `release` it or the daemon
 restarts. While it stands the daemon keeps defending it, so a claim you forget
@@ -235,7 +238,10 @@ second guess.
 It declines rather than guesses in three cases, each of which would otherwise
 produce a success that did not happen: the GPU cannot be read, a service's
 probe failed, or a service is busy in a way that would make the release a no-op.
-Every empty plan says why.
+After an action that measurably freed nothing, the daemon's own loop leaves
+that service alone for `action_cooldown`, so a service that reloads the moment
+it is released is not released once per poll forever; an explicit `request` or
+`evict` still acts. Every empty plan says why, one note per service passed over.
 
 ## Adapters
 
@@ -258,7 +264,10 @@ in the code. Each has real limits, listed here rather than discovered later.
 - No process level action without `allow_stop = true` on that service. The
   check is enforced in the scheduler, again in the daemon, and again in the
   adapter before it execs anything.
-- On any adapter error, gpu-bouncer does nothing and reports.
+- On any adapter error, gpu-bouncer does nothing, reports, and exits 1.
+- The HTTP adapters never follow a redirect and never send credentials in a
+  URL: a 3xx is an error naming where the service tried to send them, and an
+  endpoint with a password in it is refused at config time.
 - The control socket is created `0660`, owned by whoever runs the daemon.
 
 Reporting a vulnerability: [SECURITY.md](SECURITY.md).

@@ -53,7 +53,7 @@ carries two files: a `.tar.gz` holding the single `gpu-bouncer` binary, and a
 `.sha256` file for it.
 
 ```sh
-version=v0.1.0
+version=v0.1.1
 base=gpu-bouncer_${version}_linux_amd64.tar.gz
 
 curl -LO "https://github.com/hyprtuna/gpu-bouncer/releases/download/${version}/${base}"
@@ -69,7 +69,7 @@ downloaded:
 sha256sum -c "${base}.sha256"
 ```
 
-That prints `gpu-bouncer_v0.1.0_linux_amd64.tar.gz: OK` and exits 0. Anything
+That prints `gpu-bouncer_v0.1.1_linux_amd64.tar.gz: OK` and exits 0. Anything
 else means the download does not match what was published: stop, and do not
 unpack it.
 
@@ -99,7 +99,7 @@ To stamp a version number, set the same variable the release workflow sets:
 
 ```sh
 go build -trimpath \
-  -ldflags "-X github.com/hyprtuna/gpu-bouncer/internal/cli.Version=v0.1.0" \
+  -ldflags "-X github.com/hyprtuna/gpu-bouncer/internal/cli.Version=v0.1.1" \
   -o gpu-bouncer ./cmd/gpu-bouncer
 ```
 
@@ -110,7 +110,9 @@ CGO_ENABLED=0 go build -o gpu-bouncer ./cmd/gpu-bouncer
 ```
 
 That binary compiles and runs. It cannot use NVML at all, and always falls
-back to the sysfs source.
+back to the sysfs source, which cannot read an NVIDIA card's memory; see
+[When status says the source is sysfs](#when-status-says-the-source-is-sysfs)
+before using it on a machine with one.
 
 ## Minimal configuration
 
@@ -146,7 +148,9 @@ priority = 50
 
 Save it as `~/.config/gpu-bouncer/config.toml`. Everything else takes a
 default: `vram_floor_mib = 512`, `reactive = false`, `poll_interval = "5s"`,
-`gpu_index = 0`, and a per service `timeout` of `5s`.
+`gpu_index = 0`, `min_effect_mib = 64`, `action_cooldown = "60s"`, and per
+service a `timeout` of `5s` and a `drain_timeout` of `30s`. A duration set to
+zero or less is an error, not a request for the default.
 
 With `reactive = false`, which is the default, gpu-bouncer never acts on its
 own. It acts only when you run `gpu-bouncer request` or `gpu-bouncer evict`.
@@ -256,7 +260,7 @@ gpu-bouncer version
 ```
 
 ```
-gpu-bouncer v0.1.0
+gpu-bouncer v0.1.1
 ```
 
 ```sh
@@ -264,7 +268,7 @@ gpu-bouncer status
 ```
 
 ```
-GPU 0  NVIDIA GeForce RTX 4070
+GPU 0  NVIDIA GeForce RTX 4070  (PCI 0000:01:00.0, vendor 0x10de)
   7104 MiB used of 12282 MiB, 5178 MiB free  (source: nvml)
 
 ollama           ollama        priority 50   up
@@ -305,13 +309,22 @@ The plan is produced by the same function the daemon executes, so it is an
 exact preview rather than an approximation.
 
 Add `--json` to any of these for machine readable output, and `--verbose` to
-see the scheduler's per service reasoning in the text output.
+see the scheduler's per service reasoning in the text output. Both are
+accepted before or after the command name. With `--json`, an error is also a
+JSON object, `{"ok": false, "error": "..."}` on stdout, with the same exit
+code as the text mode. `--json status` carries `daemon_running` and `config`
+(the path, or `null` when no file was found) alongside the `gpu`, `devices`
+and `services` objects.
 
 `request`, `release` and `evict` do change state, and they refuse to run
 without a daemon rather than acting directly. The daemon is the only component
 allowed to act, because it is the one holding the config that says which
-services may be touched at all. `--dry-run`, accepted globally and on
-`request` and `evict`, makes the daemon plan and report without acting.
+services may be touched at all. `--dry-run`, accepted globally and after any
+command name, makes the daemon plan and report without acting; on `status`,
+`plan` and `version` it changes nothing because they never act. When any
+action a command executed failed, the text output ends with
+`N of M actions failed` and the command exits 1; an action the daemon
+declined with a reason, such as a busy ComfyUI, is not a failure.
 
 ## Uninstall
 
@@ -432,21 +445,39 @@ GPU  state unavailable
 ```
 
 Neither source opened. The message lists every attempt and why each failed.
-`status` degrades to the per service view rather than failing outright, but
-the scheduler refuses to act at all without a VRAM reading: `plan` will say
-`GPU state could not be read, so no action is safe`, and `gpu-bouncer daemon`
-refuses to start rather than running as a daemon that could only ever do
-nothing.
+
+```
+GPU  state unavailable
+  policy.gpu_index 1 names no device: the nvml source sees 1 device(s), indexes 0 to 0
+```
+
+A source opened, but `gpu_index` points past the devices it sees. The
+`devices` list in `--json status` shows what it does see. A third form, where
+the device exists but its memory cannot be read, is under
+[When status says the source is sysfs](#when-status-says-the-source-is-sysfs).
+
+In every form `status` degrades to the per service view rather than failing
+outright, but the scheduler refuses to act at all without a VRAM reading:
+`plan` says `GPU state could not be read, so no action is safe:` followed by
+the same reason, `evict` and `request` refuse the same way, and
+`gpu-bouncer daemon` refuses to start with `refusing to start, cannot read the
+arbitrated GPU:` and the reason, rather than running as a daemon that could
+only ever do nothing.
 
 ### gpu-bouncer never does anything
 
 Check `gpu-bouncer status` first. If it says
-`No services are configured, so gpu-bouncer will never act.` then no config
-file was found, and the output lists the paths that were searched.
+`No services are configured, so gpu-bouncer will never act.` then either no
+config file was found, in which case the output lists the paths that were
+searched, or the file named on the `Config:` line at the end declares no
+`[[service]]` block. The daemon line and the `Config:` line are printed
+whether or not services are configured.
 
 If services are listed but `plan` keeps saying `No action.`, read the `Notes:`
 block. Every service the scheduler considered and passed over appears there
 with the reason, so an empty plan is never silent. Common ones: reactive mode
 is off and nothing was requested; free VRAM is already at or above the floor;
-a candidate has no release API and `allow_stop` is false; a candidate is busy
-and a release would silently not take effect.
+a candidate is not below the beneficiary's priority; a candidate has no
+release API and `allow_stop` is false; a candidate is busy and a release would
+silently not take effect; a candidate is cooling down after an action on it
+freed nothing, which `status` lists with the time the cooldown ends.
